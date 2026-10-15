@@ -1,0 +1,486 @@
+module sh.sysl.lwip
+@tests
+
+import sysl.buf.{Buf, buf}
+import sysl.encoding.{put_u16_le, put_u32_le}
+import sysl.text.from_utf8_unchecked
+
+// Two endpoints of one lwIP, joined by a wire made of memory.
+//
+// **Why one lwIP and two interfaces, rather than two lwIPs.** lwIP's state is global: its pools, its
+// lists of pcbs, its timers and its counters are each one per program, so two independent stacks
+// cannot share a process. But one lwIP holds any number of interfaces, and two of them, `a` at
+// 10.0.0.1 and `b` at 10.0.0.2, joined to each other by a wire, are two endpoints with nothing in
+// common but the code: each has its own ARP entries (lwIP keys them by interface), each its own pcbs
+// (bound to its own address), and every byte between them crosses the wire as an Ethernet frame
+// that lwIP built on one side and parsed on the other. What would otherwise make the pair collapse
+// into one host is routing — lwIP would send a packet out of the first interface on the subnet
+// whichever end it came from — and the package's `lwipopts.h` routes by source address instead
+// (`LWIP_HOOK_IP4_ROUTE_SRC`), so each end's packets leave by its own interface.
+//
+// The two alternatives were worse at the thing being tested. A hand-written peer would be a second
+// TCP that the tests trusted; two processes over a pipe would test the same lwIP code with a
+// scheduler in the middle. Here the frames are also what tcpdump reads (`oracle_tests.sysl`).
+//
+// **The wire queues; it never delivers from inside a send.** lwIP is not reentrant: a frame handed
+// to `b` while `a` is still inside `tcp_output` would run `b`'s input inside `a`'s output. So a
+// driver's `send` only appends to the queue, and `step` delivers the queue from outside lwIP, then
+// moves the clock on and runs the timers when nothing is in flight.
+//
+// Every test runs in its own process, so the module storage below is a fresh fixture each time.
+
+val MAC_A: [6]u8 = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0a]
+val MAC_B: [6]u8 = [0x02, 0x00, 0x00, 0x00, 0x00, 0x0b]
+
+// A clock the test moves itself.
+struct TestClock
+    ms: u32
+
+impl Clock for TestClock
+    now_ms(*self) -> u32 = self.ms
+
+// One frame on the wire: which side it is for, and where its bytes are.
+struct Frame
+    to: int
+    start: usize
+    len: usize
+
+// The wire: every frame offered, in order, with every `drop_every`th one lost, and a pcap capture of
+// every frame that was not, stamped with the test clock.
+struct Wire
+    clock: *TestClock
+    bytes: Buf[u8]
+    frames: Buf[Frame]
+    next: usize
+    offered: usize
+    dropped: usize
+    drop_every: usize
+    pcap: Buf[u8]
+
+    offer(*self, to: int, frame: []const u8)
+        self.offered += 1
+        if self.drop_every > 0 && self.offered % self.drop_every == 0 then
+            self.dropped += 1
+            return
+        self.frames.push(Frame(to, self.bytes.len(), frame.len))
+        self.bytes.extend(frame)
+        self.record(frame)
+
+    // The capture's file header: pcap 2.4, microsecond stamps, Ethernet frames.
+    start_capture(*self)
+        var h: [24]u8 = [0; 24]
+        put_u32_le(h[0..<4], 0xa1b2c3d4)
+        put_u16_le(h[4..<6], 2)
+        put_u16_le(h[6..<8], 4)
+        put_u32_le(h[16..<20], 65535)
+        put_u32_le(h[20..<24], 1)
+        self.pcap.extend(h[..])
+
+    private record(*self, frame: []const u8)
+        val ms = self.clock.ms
+        var h: [16]u8 = [0; 16]
+        put_u32_le(h[0..<4], ms / 1000)
+        put_u32_le(h[4..<8], ms % 1000 * 1000)
+        put_u32_le(h[8..<12], u32(frame.len))
+        put_u32_le(h[12..<16], u32(frame.len))
+        self.pcap.extend(h[..])
+        self.pcap.extend(frame)
+
+// One end of the wire, as an interface's driver sees it.
+struct Port
+    wire: *Wire
+    side: int
+
+impl Driver for Port
+    send(*self, frame: []const u8) -> Result[unit, Error]
+        self.wire.offer(1 - self.side, frame)
+        Ok(())
+
+var clock: TestClock = TestClock(1000)
+var wire: Wire = Wire(&clock, buf(), buf(), 0, 0, 0, 0, buf())
+var port_a: Port = Port(&wire, 0)
+var port_b: Port = Port(&wire, 1)
+var a: Interface[Port] = interface(MAC_A)
+var b: Interface[Port] = interface(MAC_B)
+
+ip_a() -> Ip4 = ip4(10, 0, 0, 1)
+ip_b() -> Ip4 = ip4(10, 0, 0, 2)
+mask() -> Ip4 = ip4(255, 255, 255, 0)
+
+// lwIP up, both interfaces added, and the capture's header written.
+bring_up()
+    wire.start_capture()
+    init(&clock).unwrap()
+    a.add(&port_a, ip_a(), mask(), any()).unwrap()
+    b.add(&port_b, ip_b(), mask(), any()).unwrap()
+
+// Deliver everything queued, including what lwIP sends in answer, then move the clock on by 10 ms
+// and run the timers.
+step()
+    var frame: [1514]u8 = [0; 1514]
+    while wire.next < wire.frames.len()
+        val f = wire.frames.view()[wire.next]
+        wire.next += 1
+        for i in 0..<f.len
+            frame[i] = wire.bytes.view()[f.start + i]
+        if f.to == 0 then a.input(frame[0..<f.len]).unwrap() else b.input(frame[0..<f.len]).unwrap()
+    clock.ms += 10
+    check_timeouts()
+
+// Steps until `done` holds, failing after `limit_ms` of the test clock, or after ten times as many
+// steps as that should take (for a clock that has stopped).
+run_until(limit_ms: u32, done: () -> bool)
+    val deadline = clock.ms + limit_ms
+    var steps: u32 = 0
+    while !done()
+        assert(clock.ms < deadline, "the test's condition did not hold in time")
+        assert(steps < limit_ms, "the test's condition did not hold in ten times the steps it should take")
+        steps += 1
+        step()
+
+// ---- Handlers ---------------------------------------------------------------------------------
+
+// The bytes of one direction of a stream. Not periodic in any length a TCP segment has, so a segment
+// delivered twice or out of place shows.
+struct Pattern
+    seed: usize
+
+    at(self, k: usize) -> u8 = u8((k * 31 + k / 251 + self.seed) % 256)
+
+// One end of a TCP connection that sends `to_send` bytes of its pattern and checks every byte it
+// receives against the peer's.
+struct Stream
+    tcp: Option[Tcp]
+    to_send: usize
+    out: Pattern
+    expect: Pattern
+    written: usize
+    acked: usize
+    got: usize
+    mismatches: usize
+    opened: bool
+    peer_done: bool
+    failure: Option[Error]
+
+    fill(*self, tcp: Tcp)
+        var chunk: [1460]u8 = [0; 1460]
+        while self.written < self.to_send
+            val n = if self.to_send - self.written < 1460 then self.to_send - self.written else 1460
+            for i in 0..<n
+                chunk[i] = self.out.at(self.written + i)
+            val took = tcp.write(chunk[0..<n]).unwrap()
+            if took == 0 then break
+            self.written += took
+
+impl Connection for Stream
+    override connected(*self, tcp: Tcp) -> Verdict
+        self.opened = true
+        self.fill(tcp)
+        Verdict.Continue
+
+    received(*self, tcp: Tcp, data: Packet) -> Verdict
+        var chunk: [512]u8 = [0; 512]
+        var at = 0usize
+        while at < data.len()
+            val n = data.copy_to(chunk[..], at)
+            for i in 0..<n
+                if chunk[i] != self.expect.at(self.got + i) then self.mismatches += 1
+            self.got += n
+            at += n
+        Verdict.Continue
+
+    override peer_closed(*self, tcp: Tcp) -> Verdict
+        self.peer_done = true
+        Verdict.Continue
+
+    override sent(*self, tcp: Tcp, acked: usize) -> Verdict
+        self.acked += acked
+        self.fill(tcp)
+        Verdict.Continue
+
+    override poll(*self, tcp: Tcp) -> Verdict
+        self.fill(tcp)
+        Verdict.Continue
+
+    failed(*self, error: Error)
+        self.failure = Some(error)
+
+stream(to_send: usize, seed_out: usize, seed_in: usize) -> Stream =
+    Stream(None, to_send, Pattern(seed_out), Pattern(seed_in), 0, 0, 0, 0, false, false, None)
+
+// A listener that hands its one connection to `conn`.
+struct Server
+    conn: Stream
+    accepted: usize
+
+impl Listener for Server
+    accept(*self, tcp: Tcp) -> Verdict
+        self.accepted += 1
+        self.conn.tcp = Some(tcp)
+        self.conn.opened = true
+        tcp.attach(&self.conn)
+        self.conn.fill(tcp)
+        Verdict.Continue
+
+var client: Stream = Stream(None, 0, Pattern(0), Pattern(0), 0, 0, 0, 0, false, false, None)
+var server: Server = Server(Stream(None, 0, Pattern(0), Pattern(0), 0, 0, 0, 0, false, false, None), 0)
+
+client_tcp() -> Tcp = client.tcp.unwrap()
+server_tcp() -> Tcp = server.conn.tcp.unwrap()
+
+// Opens a connection from `a` to `b`'s port 7000, each end sending `bytes` bytes, and steps until
+// both ends are connected.
+open_connection(bytes: usize)
+    client = stream(bytes, 7, 13)
+    server = Server(stream(bytes, 13, 7), 0)
+    val l = tcp().unwrap()
+    l.bind(ip_b(), 7000).unwrap()
+    l.listen(&server).unwrap()
+    val t = tcp().unwrap()
+    client.tcp = Some(t)
+    t.bind(ip_a(), 0).unwrap()
+    t.connect(ip_b(), 7000, &client).unwrap()
+    run_until(5000, () -> client.opened && server.accepted == 1)
+
+// Steps until each end has received all of the other's bytes.
+transfer(bytes: usize, limit_ms: u32)
+    run_until(limit_ms, () -> client.got == bytes && server.conn.got == bytes)
+
+// What arrives at a UDP endpoint.
+struct Inbox
+    count: usize
+    text: [64]u8
+    len: usize
+    from: Ip4
+    port: u16
+
+impl Datagrams for Inbox
+    received(*self, udp: Udp, data: Packet, from: Ip4, port: u16)
+        self.count += 1
+        self.len = data.copy_to(self.text[..])
+        self.from = from
+        self.port = port
+
+var inbox_a: Inbox = Inbox(0, [0; 64], 0, Ip4(0), 0)
+var inbox_b: Inbox = Inbox(0, [0; 64], 0, Ip4(0), 0)
+
+// ICMP echo replies, caught on a raw endpoint.
+struct Pinger
+    replies: usize
+    id: u16
+    seq: u16
+    payload: usize
+    from: Ip4
+
+impl Packets for Pinger
+    received(*self, raw: Raw, data: Packet, from: Ip4) -> bool
+        val ihl = usize(data.at(0) & 0x0f) * 4
+        if data.at(ihl) != 0 then return false
+        self.replies += 1
+        self.id = u16(data.at(ihl + 4)) << 8 | u16(data.at(ihl + 5))
+        self.seq = u16(data.at(ihl + 6)) << 8 | u16(data.at(ihl + 7))
+        self.payload = data.len() - ihl - 8
+        self.from = from
+        true
+
+var pinger: Pinger = Pinger(0, 0, 0, 0, Ip4(0))
+
+// An ICMP echo request, checksummed here rather than by lwIP, so that the reply's checksum (which
+// lwIP computes) is checked against an independent one by tcpdump.
+echo_request(id: u16, seq: u16, payload: []const u8) -> Buf[u8]
+    var m: Buf[u8] = buf()
+    m.extend([8u8, 0, 0, 0, u8(id >> 8), u8(id & 0xff), u8(seq >> 8), u8(seq & 0xff)][..])
+    m.extend(payload)
+    val sum = internet_checksum(m.view())
+    m.view()[2] = u8(sum >> 8)
+    m.view()[3] = u8(sum & 0xff)
+    m
+
+internet_checksum(data: []const u8) -> u16
+    var sum: u32 = 0
+    var i = 0usize
+    while i + 1 < data.len
+        sum += u32(data[i]) << 8 | u32(data[i + 1])
+        i += 2
+    if i < data.len then sum += u32(data[i]) << 8
+    while sum > 0xffff
+        sum = (sum & 0xffff) + (sum >> 16)
+    ~u16(sum)
+
+ping(id: u16, seq: u16)
+    val r = raw(1).unwrap()
+    r.bind(ip_a()).unwrap()
+    r.receive(&pinger)
+    r.send_to(echo_request(id, seq, "sysl pings lwip".bytes).view(), ip_b()).unwrap()
+    run_until(3000, () -> pinger.replies > 0)
+
+udp_both_ways()
+    val ua = udp().unwrap()
+    ua.bind(ip_a(), 5000).unwrap()
+    ua.receive(&inbox_a)
+    val ub = udp().unwrap()
+    ub.bind(ip_b(), 6000).unwrap()
+    ub.receive(&inbox_b)
+    ua.send_to("from a to b".bytes, ip_b(), 6000).unwrap()
+    ub.send_to("and back from b".bytes, ip_a(), 5000).unwrap()
+    run_until(3000, () -> inbox_a.count == 1 && inbox_b.count == 1)
+
+// ---- The tests --------------------------------------------------------------------------------
+
+@test("an address prints dotted, its octets in order")
+address_text()
+    assert_eq(s"${ip4(10, 0, 0, 1)}", "10.0.0.1")
+    assert_eq(s"${ip4(192, 168, 100, 255)}", "192.168.100.255")
+    assert_eq(ip4(1, 2, 3, 4).octets()[0], 1)
+    assert_eq(ip4(1, 2, 3, 4).octets()[3], 4)
+    assert(any().is_any())
+
+@test("ARP resolves each end's hardware address, and each end learns the other's")
+arp_resolves()
+    bring_up()
+    assert(a.arp_entry(ip_b()).is_none())
+    a.resolve(ip_b()).unwrap()
+    run_until(1000, () -> a.arp_entry(ip_b()).is_some())
+    assert_eq(a.arp_entry(ip_b()).unwrap()[5], 0x0b)
+    assert_eq(a.arp_entry(ip_b()).unwrap()[0], 0x02)
+    assert_eq(b.arp_entry(ip_a()).unwrap()[5], 0x0a)
+    assert_eq(counters(Protocol.Arp).sent, 2)
+    assert_eq(counters(Protocol.Arp).received, 2)
+    assert_eq(wire.frames.len(), 2)
+
+@test("an ICMP echo request is answered, id, sequence and payload intact")
+icmp_echo()
+    bring_up()
+    ping(0x5359, 1)
+    assert_eq(pinger.id, 0x5359)
+    assert_eq(pinger.seq, 1)
+    assert_eq(pinger.payload, 15)
+    assert(pinger.from == ip_b())
+    // `b` counts the request it answered; the reply is taken by the raw endpoint before ICMP sees it.
+    assert_eq(counters(Protocol.Icmp).received, 1)
+    assert_eq(counters(Protocol.Icmp).sent, 1)
+    assert_eq(counters(Protocol.Icmp).checksum_errors, 0)
+
+@test("UDP crosses both ways, with the sender's address and port")
+udp_crosses()
+    bring_up()
+    udp_both_ways()
+    assert_eq(from_utf8_unchecked(inbox_b.text[0..<inbox_b.len]), "from a to b")
+    assert(inbox_b.from == ip_a())
+    assert_eq(inbox_b.port, 5000)
+    assert_eq(from_utf8_unchecked(inbox_a.text[0..<inbox_a.len]), "and back from b")
+    assert(inbox_a.from == ip_b())
+    assert_eq(inbox_a.port, 6000)
+    assert_eq(counters(Protocol.Udp).received, 2)
+
+@test("a TCP connection opens, each end bound to its own address")
+tcp_connects()
+    bring_up()
+    open_connection(0)
+    assert(client_tcp().state() == TcpState.Established)
+    assert(server_tcp().state() == TcpState.Established)
+    val (local, port) = client_tcp().local()
+    assert(local == ip_a())
+    assert(port != 0)
+    val (peer, peer_port) = server_tcp().remote()
+    assert(peer == ip_a())
+    assert_eq(peer_port, port)
+    assert(server_tcp().local().0 == ip_b())
+    assert_eq(server_tcp().local().1, 7000)
+    assert_eq(client_tcp().mss(), 1460)
+
+@test("300 KiB cross each way at once, every byte where it belongs, and the connection closes")
+tcp_transfer_and_close()
+    bring_up()
+    open_connection(300 * 1024)
+    transfer(300 * 1024, 60000)
+    assert_eq(client.mismatches, 0)
+    assert_eq(server.conn.mismatches, 0)
+    assert_eq(client.written, 300 * 1024)
+    assert_eq(server.conn.written, 300 * 1024)
+    run_until(5000, () -> client.acked == 300 * 1024 && server.conn.acked == 300 * 1024)
+    client_tcp().close().unwrap()
+    run_until(5000, () -> server.conn.peer_done)
+    assert(server_tcp().state() == TcpState.CloseWait)
+    server_tcp().close().unwrap()
+    run_until(5000, () -> wire.next == wire.frames.len())
+    assert(client.failure.is_none())
+    assert(server.conn.failure.is_none())
+    assert_eq(counters(Protocol.Tcp).checksum_errors, 0)
+    assert_eq(counters(Protocol.Tcp).dropped, 0)
+    assert_eq(tcp_retransmits(), 0)
+
+@test("with every seventh frame lost, 200 KiB still cross each way intact, by retransmission")
+tcp_survives_loss()
+    wire.drop_every = 7
+    bring_up()
+    open_connection(200 * 1024)
+    transfer(200 * 1024, 600000)
+    assert_eq(client.mismatches, 0)
+    assert_eq(server.conn.mismatches, 0)
+    assert(wire.dropped > 20)
+    assert(tcp_retransmits() > 0)
+    assert(client.failure.is_none())
+    assert(server.conn.failure.is_none())
+
+@test("a connection to a port nobody listens on is refused with a reset")
+tcp_refused()
+    bring_up()
+    client = stream(0, 7, 13)
+    val t = tcp().unwrap()
+    client.tcp = Some(t)
+    t.bind(ip_a(), 0).unwrap()
+    t.connect(ip_b(), 7001, &client).unwrap()
+    run_until(5000, () -> client.failure.is_some())
+    assert(client.failure.unwrap() == Error.Reset)
+    assert(!client.opened)
+
+@test("lwIP's pool holds the configured number of TCP pcbs, and no more")
+tcp_pool_is_bounded()
+    init(&clock).unwrap()
+    var held = 0
+    loop
+        tcp() match
+            Ok(_) -> held += 1
+            Err(e) ->
+                assert(e == Error.OutOfMemory)
+                break
+    assert_eq(held, 8)
+
+@test("init is refused a second time")
+init_once()
+    init(&clock).unwrap()
+    assert(init(&clock).unwrap_err() == Error.Already)
+
+@test("an interface is refused a second add, and frames before one")
+interface_misuse()
+    init(&clock).unwrap()
+    assert(a.input([0u8; 60][..]).unwrap_err() == Error.Interface)
+    a.add(&port_a, ip_a(), mask(), any()).unwrap()
+    assert(a.add(&port_a, ip_a(), mask(), any()).unwrap_err() == Error.InUse)
+    assert(a.address() == ip_a())
+    a.remove()
+    assert(!a.is_added())
+
+@test("a frame longer than an Ethernet frame is refused")
+oversized_frame()
+    bring_up()
+    var big: [1515]u8 = [0; 1515]
+    assert(a.input(big[..]).unwrap_err() == Error.Argument)
+
+@test("DHCP starts by broadcasting a DISCOVER")
+dhcp_discovers()
+    wire.start_capture()
+    init(&clock).unwrap()
+    a.add(&port_a, any(), any(), any()).unwrap()
+    a.start_dhcp().unwrap()
+    run_until(1000, () -> wire.frames.len() > 0)
+    val f = wire.frames.view()[0]
+    val bytes = wire.bytes.view()[f.start..<f.start + f.len]
+    for i in 0..<6usize
+        assert_eq(bytes[i], 0xff)
+    assert_eq(bytes[23], 17)
+    assert_eq(bytes[35], 68)
+    assert_eq(bytes[37], 67)
+    assert(!a.dhcp_bound())
+    a.stop_dhcp()

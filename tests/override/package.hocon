@@ -1,0 +1,13 @@
+// A consumer of the package with its own `lwipopts.h`, which is the only way to prove that the
+// package's C, its `c const` probes and lwIP's own objects all read a consumer's configuration rather
+// than the default. It is a project of its own, so `sysl test .` at the repository root does not reach
+// it: `sysl test tests/override` does.
+
+package {
+  name    = "lwip-override"
+  version = "0.0.1"
+}
+
+dependencies {
+  lwip { path = "../..", c_include = ["config"] }
+}

@@ -1,0 +1,69 @@
+// A board's network loop: an echo server on TCP port 7, over a stand-in for the board's Ethernet MAC.
+// The C side of the board calls `net_run` with a function answering its millisecond tick and one
+// copying the next received frame (answering its length, or 0 for none).
+//
+//     sysl build-c examples/board.sysl -o board.a
+
+import sh.sysl.lwip.{init, check_timeouts, interface, ip4, tcp, Clock, Connection, Driver, Error,
+                     Interface, Listener, Packet, Tcp, Verdict}
+
+struct Ticks
+    ms: u32
+
+impl Clock for Ticks
+    now_ms(*self) -> u32 = self.ms
+
+// The board's Ethernet MAC: `send` copies a frame into a transmit descriptor.
+struct Mac
+    sent: u32
+
+impl Driver for Mac
+    send(*self, frame: []const u8) -> Result[unit, Error]
+        self.sent += 1
+        Ok(())
+
+// An echo server: whatever arrives goes straight back.
+struct Echo
+    open: bool
+
+impl Connection for Echo
+    received(*self, tcp: Tcp, data: Packet) -> Verdict
+        var chunk: [512]u8 = [0; 512]
+        var at = 0usize
+        while at < data.len()
+            val n = data.copy_to(chunk[..], at)
+            tcp.write(chunk[0..<n])
+            at += n
+        Verdict.Continue
+
+    failed(*self, error: Error)
+        self.open = false
+
+struct Server
+    conn: Echo
+
+impl Listener for Server
+    accept(*self, tcp: Tcp) -> Verdict
+        self.conn.open = true
+        tcp.attach(&self.conn)
+        Verdict.Continue
+
+// Everything lwIP keeps the address of lives in this frame, which never returns.
+@export("net_run")
+run(read_tick: *extern() -> u32, next_frame: *extern(*u8) -> usize) -> int
+    var ticks = Ticks(0)
+    var mac = Mac(0)
+    var eth: Interface[Mac] = interface([0x02, 0, 0, 0, 0, 0x01])
+    var server = Server(Echo(false))
+    init(&ticks).unwrap()
+    eth.add(&mac, ip4(192, 168, 1, 50), ip4(255, 255, 255, 0), ip4(192, 168, 1, 1)).unwrap()
+    eth.set_default()
+    val listener = tcp().unwrap()
+    listener.bind(ip4(0, 0, 0, 0), 7).unwrap()
+    listener.listen(&server).unwrap()
+    var frame: [1514]u8 = [0; 1514]
+    loop
+        val n = next_frame(&frame[0])
+        if n > 0 then eth.input(frame[0..<n])
+        ticks.ms = read_tick()
+        check_timeouts()

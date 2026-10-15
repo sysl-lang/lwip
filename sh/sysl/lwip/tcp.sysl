@@ -1,0 +1,249 @@
+module sh.sysl.lwip
+@no_alloc
+
+import sh.sysl.lwip.c
+import sysl.slices.as_ptr
+
+// What a TCP callback tells lwIP to do next.
+enum Verdict
+    // Carry on.
+    Continue
+    // Reset the connection. lwIP sends a RST, frees it, and calls the handler's `failed` with
+    // `Error.Aborted`. From inside a callback this is the only way to abort: `Tcp.abort` is for
+    // outside one.
+    Abort
+
+// The states of RFC 793, as lwIP names them.
+enum TcpState derives Display
+    Closed
+    Listen
+    SynSent
+    SynReceived
+    Established
+    FinWait1
+    FinWait2
+    CloseWait
+    Closing
+    LastAck
+    TimeWait
+
+// What happens on one TCP connection, in lwIP's words. lwIP calls these from inside
+// `Interface.input` and `check_timeouts`, never at any other time.
+//
+// A handler is attached to a connection with `Tcp.connect` or, for one a listener accepted, with
+// `Tcp.attach` from inside `Listener.accept`. **It stays where it is while attached**: lwIP holds its
+// address until the connection is closed with `Tcp.close` (which detaches it) or ends by itself,
+// which `failed` reports.
+trait Connection
+    // An active open (`Tcp.connect`) completed: the peer accepted.
+    connected(*self, tcp: Tcp) -> Verdict = Verdict.Continue
+
+    // Data arrived. lwIP has already been told it was taken, so the window reopens; `data` is only
+    // valid during the call.
+    received(*self, tcp: Tcp, data: Packet) -> Verdict
+
+    // The peer finished sending (its FIN arrived). Data can still be sent until this side closes too,
+    // which by default it does at once.
+    peer_closed(*self, tcp: Tcp) -> Verdict
+        tcp.close() match
+            Ok(_) -> Verdict.Continue
+            Err(_) -> Verdict.Abort
+
+    // The peer acknowledged `acked` more bytes, so as many more fit in the send buffer.
+    sent(*self, tcp: Tcp, acked: usize) -> Verdict = Verdict.Continue
+
+    // lwIP's periodic call, every `poll_interval` half-seconds of `Tcp.attach`, while the connection
+    // is open: the place to retry a write that found the buffer full.
+    poll(*self, tcp: Tcp) -> Verdict = Verdict.Continue
+
+    // The connection is gone: reset by the peer, timed out, or aborted. lwIP has already freed it, so
+    // `tcp` names nothing any more, and the handler is free to go.
+    failed(*self, error: Error)
+
+// What happens on a listening endpoint.
+trait Listener
+    // A connection arrived. Attach a `Connection` to it (`tcp.attach`) and answer `Continue`, or
+    // answer `Abort` to refuse it with a RST.
+    accept(*self, tcp: Tcp) -> Verdict
+
+// A TCP endpoint: lwIP's `tcp_pcb`, which lwIP owns and frees.
+struct Tcp derives Eq
+    private pcb: *c.TcpPcb
+
+    // Bind to `address` (`any()` for every interface) and `port` (0 for one lwIP picks).
+    bind(self, address: Ip4, port: u16) -> Result[unit, Error]
+        var ip = address.raw()
+        check(c.tcp_bind(self.pcb, &ip, port))
+
+    // Listen, with `listener` hearing of each connection. lwIP frees this endpoint and answers a
+    // smaller one that only listens, so after a success `self` names nothing and the answer is the
+    // listener's handle. `listener` stays where it is until that handle is closed.
+    listen[L: Listener](self, listener: *L, backlog: u8 = 4) -> Result[Tcp, Error]
+        var err = c.ERR_OK
+        val l = c.tcp_listen(self.pcb, backlog, &err)
+        if l == null then return Err(error(err))
+        c.tcp_arg(l, ptr_cast(listener))
+        c.tcp_accept(l, &on_accept[L])
+        Ok(Tcp(l))
+
+    // Connect to `address`:`port`, with `handler` attached from now on: its `connected` runs when the
+    // peer accepts, its `failed` if it never does.
+    connect[H: Connection](self, address: Ip4, port: u16, handler: *H, poll_interval: u8 = 4) -> Result[unit, Error]
+        self.attach(handler, poll_interval)
+        var ip = address.raw()
+        val r = c.tcp_connect(self.pcb, &ip, port, &on_connected[H])
+        if r != c.ERR_OK then self.detach()
+        check(r)
+
+    // Attach `handler` to this connection: lwIP calls it for everything that happens from now on,
+    // and `poll` every `poll_interval` half-seconds.
+    attach[H: Connection](self, handler: *H, poll_interval: u8 = 4)
+        c.tcp_arg(self.pcb, ptr_cast(handler))
+        c.tcp_recv(self.pcb, &on_recv[H])
+        c.tcp_sent(self.pcb, &on_sent[H])
+        c.tcp_err(self.pcb, &on_err[H])
+        c.tcp_poll(self.pcb, &on_poll[H], poll_interval)
+
+    // Queue as much of `data` as the send buffer has room for, answering how much that was: 0 when it
+    // is full, and the rest goes when the peer acknowledges more (`Connection.sent`). lwIP copies
+    // what it takes, so `data` may be reused at once. `more` says another write follows straight
+    // away, so lwIP need not push this one (it leaves PSH off).
+    //
+    // What is queued goes out at lwIP's next chance: the end of the callback this is called from, or
+    // `output`.
+    write(self, data: []const u8, more: bool = false) -> Result[usize, Error]
+        val room = usize(c.tcp_sndbuf(self.pcb))
+        var n = if data.len < room then data.len else room
+        if n > 0xffff then n = 0xffff
+        if n == 0 then return Ok(0)
+        val flags = if more then c.TCP_WRITE_FLAG_COPY | c.TCP_WRITE_FLAG_MORE else c.TCP_WRITE_FLAG_COPY
+        val r = c.tcp_write(self.pcb, as_ptr(data), u16(n), flags)
+        if r == c.ERR_MEM then return Ok(0)
+        check(r)?
+        Ok(n)
+
+    // Send what is queued now, rather than at the end of the current callback.
+    output(self) -> Result[unit, Error] = check(c.tcp_output(self.pcb))
+
+    // How many bytes `write` would take now.
+    send_buffer(self) -> usize = usize(c.tcp_sndbuf(self.pcb))
+
+    // How many segments are queued and not yet acknowledged.
+    queued_segments(self) -> usize = usize(c.tcp_sndqueuelen(self.pcb))
+
+    // The largest segment this connection sends.
+    mss(self) -> usize = usize(c.tcp_mss(self.pcb))
+
+    // Turn Nagle's algorithm (which holds back a small segment while one is unacknowledged) on or
+    // off. It starts on.
+    set_nagle(self, on: bool) = c.tcp_nagle(self.pcb, if on then 1 else 0)
+
+    state(self) -> TcpState
+        val s = c.tcp_state(self.pcb)
+        if s == c.LISTEN then TcpState.Listen
+        else if s == c.SYN_SENT then TcpState.SynSent
+        else if s == c.SYN_RCVD then TcpState.SynReceived
+        else if s == c.ESTABLISHED then TcpState.Established
+        else if s == c.FIN_WAIT_1 then TcpState.FinWait1
+        else if s == c.FIN_WAIT_2 then TcpState.FinWait2
+        else if s == c.CLOSE_WAIT then TcpState.CloseWait
+        else if s == c.CLOSING then TcpState.Closing
+        else if s == c.LAST_ACK then TcpState.LastAck
+        else if s == c.TIME_WAIT then TcpState.TimeWait
+        else TcpState.Closed
+
+    // This end's address and port.
+    local(self) -> (Ip4, u16) = self.address(1)
+
+    // The peer's address and port.
+    remote(self) -> (Ip4, u16) = self.address(0)
+
+    // Close: send a FIN after whatever is queued, and let lwIP finish the close and free the
+    // endpoint by itself. The handler is detached first, so nothing more is called on it and it is
+    // free to go; data the peer still sends is acknowledged and dropped.
+    //
+    // lwIP may have no memory for the FIN. Then the connection is reset instead, so that it is gone
+    // either way, and the answer is `OutOfMemory`.
+    close(self) -> Result[unit, Error]
+        if c.tcp_state(self.pcb) == c.LISTEN then
+            c.tcp_arg(self.pcb, null)
+            return check(c.tcp_close(self.pcb))
+        self.detach()
+        val r = c.tcp_close(self.pcb)
+        if r != c.ERR_OK then c.tcp_abort(self.pcb)
+        check(r)
+
+    // Close one or both halves without detaching: shutting down sending sends a FIN and keeps
+    // receiving.
+    shutdown(self, receive: bool, send: bool) -> Result[unit, Error]
+        check(c.tcp_shutdown(self.pcb, if receive then 1 else 0, if send then 1 else 0))
+
+    // Reset the connection and free it, from outside a callback (inside one, answer
+    // `Verdict.Abort`). The handler's `failed` runs, with `Error.Aborted`.
+    abort(self) = c.tcp_abort(self.pcb)
+
+    private detach(self)
+        c.tcp_recv(self.pcb, null)
+        c.tcp_sent(self.pcb, null)
+        c.tcp_err(self.pcb, null)
+        c.tcp_poll(self.pcb, null, 0)
+        c.tcp_arg(self.pcb, null)
+
+    private address(self, local: int) -> (Ip4, u16)
+        var ip = c.Ip4Addr(0)
+        var port: u16 = 0
+        c.tcp_addrinfo(self.pcb, local, &ip, &port)
+        (Ip4(ip.addr), port)
+end Tcp
+
+// A new TCP endpoint, from lwIP's pool.
+tcp() -> Result[Tcp, Error]
+    val pcb = c.tcp_new()
+    if pcb == null then Err(Error.OutOfMemory) else Ok(Tcp(pcb))
+
+// The four callbacks of a connection, and the listener's, one instantiation per handler type. Each
+// finds its handler through lwIP's `arg`.
+
+private on_connected[H: Connection](arg: *u8, pcb: *c.TcpPcb, err: i8) -> i8
+    val h: *H = ptr_cast(arg)
+    val tcp = Tcp(pcb)
+    answer(tcp, h.connected(tcp))
+
+private on_recv[H: Connection](arg: *u8, pcb: *c.TcpPcb, p: *c.Pbuf, err: i8) -> i8
+    val tcp = Tcp(pcb)
+    val h: *H = ptr_cast(arg)
+    if p == null then return answer(tcp, h.peer_closed(tcp))
+    c.tcp_recved(pcb, p.tot_len)
+    val v = h.received(tcp, Packet(p))
+    c.pbuf_free(p)
+    answer(tcp, v)
+
+private on_sent[H: Connection](arg: *u8, pcb: *c.TcpPcb, len: u16) -> i8
+    if arg == null then return c.ERR_OK
+    val h: *H = ptr_cast(arg)
+    val tcp = Tcp(pcb)
+    answer(tcp, h.sent(tcp, usize(len)))
+
+private on_poll[H: Connection](arg: *u8, pcb: *c.TcpPcb) -> i8
+    if arg == null then return c.ERR_OK
+    val h: *H = ptr_cast(arg)
+    val tcp = Tcp(pcb)
+    answer(tcp, h.poll(tcp))
+
+private on_err[H: Connection](arg: *u8, err: i8)
+    if arg == null then return
+    val h: *H = ptr_cast(arg)
+    h.failed(error(err))
+
+private on_accept[L: Listener](arg: *u8, pcb: *c.TcpPcb, err: i8) -> i8
+    if pcb == null || err != c.ERR_OK then return c.ERR_VAL
+    val l: *L = ptr_cast(arg)
+    val tcp = Tcp(pcb)
+    answer(tcp, l.accept(tcp))
+
+private answer(tcp: Tcp, v: Verdict) -> i8
+    v match
+        Verdict.Continue -> c.ERR_OK
+        Verdict.Abort ->
+            c.tcp_abort(tcp.pcb)
+            c.ERR_ABRT

@@ -1,0 +1,136 @@
+module sh.sysl.lwip
+@tests
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{make_temp_dir, remove_dir_all, write_bytes}
+import sysl.process.capture
+import sysl.text.{split, Search}
+
+// **The oracle is tcpdump**: the wire's frames, written as a pcap capture, decoded by the host's own
+// `/usr/sbin/tcpdump -r <file> -vv -nn`, which knows nothing of lwIP or of these tests. At `-vv` it
+// checks every IP header checksum and every TCP, UDP and ICMP checksum and says "incorrect" or "bad"
+// of one that does not add up, and it prints each TCP segment's flags, so the handshake and the close
+// can be read off its text as RFC 793 draws them.
+//
+// What the wire tests check from inside — that the bytes arrived — this checks from outside: that
+// what lwIP put on the wire is well-formed for any other stack that might have been at the far end.
+
+// tcpdump's reading of the capture, one string per line.
+private tcpdump() -> []string
+    val dir = make_temp_dir("lwip-oracle-").unwrap()
+    val file = s"${dir}/wire.pcap"
+    write_bytes(file, wire.pcap.view()).unwrap()
+    val out = capture("/usr/sbin/tcpdump", ["-r", file, "-vv", "-nn"], stderr = true).unwrap()
+    remove_dir_all(dir).unwrap()
+    assert(out.status.ok(), s"tcpdump could not read the capture: ${out.text}")
+    split(out.text, "\n")
+
+// The lines that open a packet: tcpdump starts each with its timestamp.
+private packets(lines: []string) -> Buf[string]
+    var out: Buf[string] = buf()
+    for line in lines
+        if line.len > 0 && line.bytes[0] >= u8('0') && line.bytes[0] <= u8('9') then out.push(line)
+    out
+
+// The first line at or after `from` holding every one of `needles`, or `lines.len` for none.
+private find(lines: []string, from: usize, needles: []const string) -> usize
+    for i in from..<lines.len
+        var all = true
+        for n in needles
+            if !lines[i].contains(n) then all = false
+        if all then return i
+    lines.len
+
+// No line of tcpdump's says a checksum or a header is wrong. tcpdump writes "(incorrect -> 0x…)" of
+// a TCP checksum and "bad" as a word of the rest ("bad cksum", "[bad udp cksum"), so "bad" is looked
+// for after a space or a bracket: a checksum's own hex digits spell it too (`cksum 0x7bad`).
+private nothing_wrong(lines: []string)
+    for line in lines
+        assert(!line.contains("incorrect"), s"tcpdump found a wrong checksum: $line")
+        val bad = line.contains(" bad") || line.contains("(bad") || line.contains("[bad")
+        assert(!bad, s"tcpdump found something bad: $line")
+
+private count(lines: []string, needle: string) -> usize
+    var n = 0usize
+    for line in lines
+        if line.contains(needle) then n += 1
+    n
+
+@test("tcpdump decodes every frame of ARP, ping, UDP and a 300 KiB TCP exchange, every checksum correct, the handshake and close in order")
+tcpdump_reads_the_wire()
+    bring_up()
+    a.resolve(ip_b()).unwrap()
+    run_until(1000, () -> a.arp_entry(ip_b()).is_some())
+    ping(7, 1)
+    udp_both_ways()
+    open_connection(300 * 1024)
+    transfer(300 * 1024, 60000)
+    run_until(5000, () -> client.acked == 300 * 1024 && server.conn.acked == 300 * 1024)
+    val (_, port) = client_tcp().local()
+    client_tcp().close().unwrap()
+    run_until(5000, () -> server.conn.peer_done)
+    server_tcp().close().unwrap()
+    run_until(5000, () -> wire.next == wire.frames.len())
+
+    val lines = tcpdump()
+    nothing_wrong(lines)
+
+    // Every frame on the wire is a packet tcpdump read.
+    val heads = packets(lines)
+    assert_eq(heads.len(), wire.frames.len())
+    assert(wire.frames.len() > 400)
+
+    // Each kind is there, with tcpdump's own word for it.
+    assert_eq(count(lines, "Request who-has 10.0.0.2 tell 10.0.0.1"), 1)
+    assert_eq(count(lines, "Reply 10.0.0.2 is-at 02:00:00:00:00:0b"), 1)
+    assert_eq(count(lines, "ICMP echo request, id 7, seq 1"), 1)
+    assert_eq(count(lines, "ICMP echo reply, id 7, seq 1"), 1)
+    assert_eq(count(lines, "10.0.0.1.5000 > 10.0.0.2.6000: [udp sum ok] UDP, length 11"), 1)
+    assert_eq(count(lines, "10.0.0.2.6000 > 10.0.0.1.5000: [udp sum ok] UDP, length 15"), 1)
+
+    // Every TCP segment's checksum was checked, and was right; and both UDP datagrams'. (tcpdump says
+    // nothing of a right IP header checksum or ICMP checksum, only "bad" of a wrong one.)
+    val client_end = s"10.0.0.1.${port}"
+    val tcp_lines = count(lines, "Flags [")
+    assert(tcp_lines > 400)
+    assert_eq(count(lines, "(correct)"), tcp_lines)
+    assert_eq(count(lines, "[udp sum ok]"), 2)
+
+    // The three-way handshake, in order: the SYN, the SYN-ACK acknowledging it, and the client's next
+    // segment acknowledging that (lwIP carries the third step on its first data segment).
+    val syn = find(lines, 0, [s"${client_end} > 10.0.0.2.7000:", "Flags [S],", "options [mss 1460"])
+    assert(syn < lines.len, "no SYN from the client")
+    val syn_ack = find(lines, syn + 1, [s"10.0.0.2.7000 > ${client_end}:", "Flags [S.],"])
+    assert(syn_ack < lines.len, "no SYN-ACK from the server after the SYN")
+    val ack = find(lines, syn_ack + 1, [s"${client_end} > 10.0.0.2.7000:"])
+    assert(ack < lines.len, "nothing from the client after the SYN-ACK")
+    assert(lines[ack].contains(", ack 1,"), s"the client's next segment does not acknowledge the SYN: ${lines[ack]}")
+    assert_eq(count(lines, "Flags [S],"), 1)
+    assert_eq(count(lines, "Flags [S.],"), 1)
+
+    // The close: the client's FIN, the server's FIN after it, and the client's last ACK.
+    val fin = find(lines, ack + 1, [s"${client_end} > 10.0.0.2.7000:", "Flags [F.],"])
+    assert(fin < lines.len, "no FIN from the client")
+    val fin_back = find(lines, fin + 1, [s"10.0.0.2.7000 > ${client_end}:", "Flags [F.],"])
+    assert(fin_back < lines.len, "no FIN from the server after the client's")
+    val last = find(lines, fin_back + 1, [s"${client_end} > 10.0.0.2.7000:", "Flags [.],"])
+    assert(last < lines.len, "no last ACK from the client")
+    // Each FIN comes after all 300 KiB of its sender's data, and the last ACK covers the server's FIN
+    // (tcpdump numbers a stream's bytes from the SYN, which takes one).
+    assert(lines[fin].contains(s"seq ${300 * 1024 + 1}, ack ${300 * 1024 + 1},"), lines[fin])
+    assert(lines[fin_back].contains(s"seq ${300 * 1024 + 1}, ack ${300 * 1024 + 2},"), lines[fin_back])
+    assert(lines[last].contains(s"seq ${300 * 1024 + 2}, ack ${300 * 1024 + 2},"), lines[last])
+    assert_eq(count(lines, "Flags [F.],"), 2)
+    assert_eq(count(lines, "Flags [R"), 0)
+
+@test("tcpdump reads a lossy exchange the same way: every checksum right, and the retransmissions visible")
+tcpdump_reads_a_lossy_wire()
+    wire.drop_every = 7
+    bring_up()
+    open_connection(64 * 1024)
+    transfer(64 * 1024, 600000)
+    val lines = tcpdump()
+    nothing_wrong(lines)
+    assert_eq(packets(lines).len(), wire.frames.len())
+    assert(wire.dropped > 0)
+    assert(tcp_retransmits() > 0)

@@ -1,0 +1,35 @@
+@tests
+
+import sh.sysl.lwip.{init, tcp, Clock, Error}
+import sh.sysl.lwip.c
+
+// A clock that never moves: these tests run no timers.
+struct Still
+    ms: u32
+
+impl Clock for Still
+    now_ms(*self) -> u32 = self.ms
+
+@test("the package's probes read this project's lwipopts.h, not the package's")
+probes_read_the_consumers_options()
+    assert_eq(c.MEMP_NUM_TCP_PCB, 13)
+    assert_eq(c.TCP_SND_BUF, 2 * 1460)
+    // What this project left alone is still the package's default.
+    assert_eq(c.MEMP_NUM_UDP_PCB, 6)
+    assert_eq(c.TCP_MSS, 1460)
+
+@test("lwIP's own objects were compiled with this project's options: thirteen TCP pcbs and no more, each with a 2920-byte send buffer")
+objects_read_the_consumers_options()
+    // lwIP reads the clock for the rest of the program, and this test is the whole program.
+    var clock = Still(0)
+    init(&clock).unwrap()
+    var held = 0
+    loop
+        tcp() match
+            Ok(t) ->
+                held += 1
+                assert_eq(t.send_buffer(), 2 * 1460)
+            Err(e) ->
+                assert(e == Error.OutOfMemory)
+                break
+    assert_eq(held, 13)

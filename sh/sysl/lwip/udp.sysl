@@ -1,0 +1,118 @@
+module sh.sysl.lwip
+@no_alloc
+
+import sh.sysl.lwip.c
+import sysl.slices.as_ptr
+
+// What arrives at a UDP endpoint.
+trait Datagrams
+    // A datagram from `from`:`port`. `data` is only valid during the call.
+    received(*self, udp: Udp, data: Packet, from: Ip4, port: u16)
+
+// What arrives at a raw endpoint.
+trait Packets
+    // An IP packet of the endpoint's protocol from `from`; `data` starts at its IP header and is only
+    // valid during the call. Answer `true` to take it, so lwIP looks no further, or `false` to let
+    // lwIP handle it as it would have (an ICMP echo request is still answered, say).
+    received(*self, raw: Raw, data: Packet, from: Ip4) -> bool
+
+// The longest datagram `send_to` takes: what fits an IPv4 packet after its headers.
+const MAX_DATAGRAM: usize = 65507
+
+// A UDP endpoint: lwIP's `udp_pcb`.
+struct Udp derives Eq
+    private pcb: *c.UdpPcb
+
+    // Bind to `address` (`any()` for every interface) and `port` (0 for one lwIP picks).
+    bind(self, address: Ip4, port: u16) -> Result[unit, Error]
+        var ip = address.raw()
+        check(c.udp_bind(self.pcb, &ip, port))
+
+    // Send only to, and hear only from, `address`:`port`.
+    connect(self, address: Ip4, port: u16) -> Result[unit, Error]
+        var ip = address.raw()
+        check(c.udp_connect(self.pcb, &ip, port))
+
+    disconnect(self) = c.udp_disconnect(self.pcb)
+
+    // Send `data` as one datagram to `address`:`port`. lwIP copies it into a buffer from its heap
+    // first, so `data` may be reused at once.
+    send_to(self, data: []const u8, address: Ip4, port: u16) -> Result[unit, Error]
+        val p = datagram(data)?
+        var ip = address.raw()
+        val r = c.udp_sendto(self.pcb, p, &ip, port)
+        c.pbuf_free(p)
+        check(r)
+
+    // Send `data` to the address `connect` named.
+    send(self, data: []const u8) -> Result[unit, Error]
+        val p = datagram(data)?
+        val r = c.udp_send(self.pcb, p)
+        c.pbuf_free(p)
+        check(r)
+
+    // Hand every datagram that arrives to `handler`, which stays where it is until `remove`.
+    receive[H: Datagrams](self, handler: *H) = c.udp_recv(self.pcb, &on_datagram[H], ptr_cast(handler))
+
+    // Give the endpoint back to lwIP's pool. The handle names nothing afterwards.
+    remove(self) = c.udp_remove(self.pcb)
+end Udp
+
+// A new UDP endpoint, from lwIP's pool.
+udp() -> Result[Udp, Error]
+    val pcb = c.udp_new()
+    if pcb == null then Err(Error.OutOfMemory) else Ok(Udp(pcb))
+
+// A raw IP endpoint, for a protocol lwIP has no API for: lwIP's `raw_pcb`. What is sent is the
+// payload, and lwIP puts the IP header in front of it.
+struct Raw derives Eq
+    private pcb: *c.RawPcb
+
+    // Take only packets addressed to `address`, and send from it.
+    bind(self, address: Ip4) -> Result[unit, Error]
+        var ip = address.raw()
+        check(c.raw_bind(self.pcb, &ip))
+
+    // Send `data` to `address` as the payload of one IP packet of this endpoint's protocol.
+    send_to(self, data: []const u8, address: Ip4) -> Result[unit, Error]
+        val p = datagram(data)?
+        var ip = address.raw()
+        val r = c.raw_sendto(self.pcb, p, &ip)
+        c.pbuf_free(p)
+        check(r)
+
+    // Hand every packet of the protocol that arrives to `handler`, which stays where it is until
+    // `remove`.
+    receive[H: Packets](self, handler: *H) = c.raw_recv(self.pcb, &on_packet[H], ptr_cast(handler))
+
+    remove(self) = c.raw_remove(self.pcb)
+end Raw
+
+// A new raw endpoint for IP protocol number `protocol` (1 is ICMP), from lwIP's pool.
+raw(protocol: u8) -> Result[Raw, Error]
+    val pcb = c.raw_new(protocol)
+    if pcb == null then Err(Error.OutOfMemory) else Ok(Raw(pcb))
+
+// `data` copied into a buffer from lwIP's heap, with room in front for every header down to the
+// link layer.
+private datagram(data: []const u8) -> Result[*c.Pbuf, Error]
+    if data.len > MAX_DATAGRAM then return Err(Error.Argument)
+    val p = c.pbuf_alloc(c.PBUF_TRANSPORT, u16(data.len), c.PBUF_RAM)
+    if p == null then return Err(Error.OutOfMemory)
+    if data.len > 0 then
+        val r = c.pbuf_take(p, as_ptr(data), u16(data.len))
+        if r != c.ERR_OK then
+            c.pbuf_free(p)
+            return Err(error(r))
+    Ok(p)
+
+private on_datagram[H: Datagrams](arg: *u8, pcb: *c.UdpPcb, p: *c.Pbuf, from: *c.Ip4Addr, port: u16)
+    val h: *H = ptr_cast(arg)
+    h.received(Udp(pcb), Packet(p), ip_of(from), port)
+    c.pbuf_free(p)
+
+private on_packet[H: Packets](arg: *u8, pcb: *c.RawPcb, p: *c.Pbuf, from: *c.Ip4Addr) -> u8
+    val h: *H = ptr_cast(arg)
+    if !h.received(Raw(pcb), Packet(p), ip_of(from)) then return 0
+    c.pbuf_free(p)
+    1

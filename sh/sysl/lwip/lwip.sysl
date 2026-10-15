@@ -1,0 +1,251 @@
+module sh.sysl.lwip
+@no_alloc
+
+import sh.sysl.lwip.c
+import sysl.text.str_view
+
+// lwIP, the TCP/IP stack most microcontroller networking runs on, driven with no operating system
+// under it: one thread calls in, lwIP calls back.
+//
+// **The shape is lwIP's raw API.** A program gives lwIP an `Interface` over its Ethernet (or Wi-Fi)
+// driver, opens `Tcp`, `Udp` and `Raw` endpoints, and hears about what happens on them through
+// traits it implements — `Connection`, `Listener`, `Datagrams`, `Packets` — whose methods lwIP calls
+// from inside `Interface.input` and `check_timeouts`. Between those calls nothing runs.
+//
+// **Nothing comes from the program's heap.** Every pcb, every packet buffer and every queued segment
+// is taken from lwIP's own pools and its own heap, which are static arrays inside the library sized
+// by `lwipopts.h`. An `Interface` is storage the program owns, typically a module `var`.
+//
+// **What must stay where it is.** lwIP keeps addresses, and a copy of what it points at is a copy
+// lwIP knows nothing about:
+//
+// - an `Interface`, from `add` until `remove` (lwIP links it into its list of interfaces and hands
+//   it to every frame it sends);
+// - the driver an `Interface` was made over, for as long as the interface is added;
+// - the clock `init` was given, for the life of the program;
+// - a `Connection`, `Listener`, `Datagrams` or `Packets` handler, for as long as it is attached to an
+//   endpoint (until `close`, `remove`, or its `failed`).
+//
+// The endpoints themselves (`Tcp`, `Udp`, `Raw`) are handles: one word naming a pcb in lwIP's pool,
+// freely copied. lwIP frees the pcb, and a handle kept after `close`, `remove`, `abort` or `failed`
+// names nothing.
+
+// Why lwIP refused, by `err.h`'s numbers.
+enum Error derives Eq, Display
+    // A pool or lwIP's heap had nothing left (`ERR_MEM`).
+    OutOfMemory
+    // A buffer error (`ERR_BUF`).
+    Buffer
+    Timeout
+    // No interface leads to the address (`ERR_RTE`).
+    NoRoute
+    InProgress
+    // An illegal value (`ERR_VAL`).
+    Invalid
+    WouldBlock
+    // The address and port are taken (`ERR_USE`).
+    InUse
+    // A connect is already under way (`ERR_ALREADY`).
+    Already
+    // Already connected (`ERR_ISCONN`).
+    Connected
+    // Not connected (`ERR_CONN`).
+    NotConnected
+    // A low-level interface error (`ERR_IF`), which is what a driver answers when it cannot send.
+    Interface
+    // The connection was aborted, by this side (`ERR_ABRT`).
+    Aborted
+    // The connection was reset by the peer (`ERR_RST`).
+    Reset
+    // The connection was closed (`ERR_CLSD`).
+    Closed
+    // An illegal argument (`ERR_ARG`).
+    Argument
+    // A code this binding does not know, from an lwIP newer than the one it was written against.
+    Unknown(code: int)
+
+// The error an `err_t` stands for. `ERR_OK` is not one, and reads as `Unknown(0)`.
+error(code: i8) -> Error
+    if code == c.ERR_MEM then Error.OutOfMemory
+    else if code == c.ERR_BUF then Error.Buffer
+    else if code == c.ERR_TIMEOUT then Error.Timeout
+    else if code == c.ERR_RTE then Error.NoRoute
+    else if code == c.ERR_INPROGRESS then Error.InProgress
+    else if code == c.ERR_VAL then Error.Invalid
+    else if code == c.ERR_WOULDBLOCK then Error.WouldBlock
+    else if code == c.ERR_USE then Error.InUse
+    else if code == c.ERR_ALREADY then Error.Already
+    else if code == c.ERR_ISCONN then Error.Connected
+    else if code == c.ERR_CONN then Error.NotConnected
+    else if code == c.ERR_IF then Error.Interface
+    else if code == c.ERR_ABRT then Error.Aborted
+    else if code == c.ERR_RST then Error.Reset
+    else if code == c.ERR_CLSD then Error.Closed
+    else if code == c.ERR_ARG then Error.Argument
+    else Error.Unknown(int(code))
+
+// The `err_t` an error stands for, which is what a callback hands back to lwIP.
+private[lwip] code(e: Error) -> i8
+    e match
+        Error.OutOfMemory -> c.ERR_MEM
+        Error.Buffer -> c.ERR_BUF
+        Error.Timeout -> c.ERR_TIMEOUT
+        Error.NoRoute -> c.ERR_RTE
+        Error.InProgress -> c.ERR_INPROGRESS
+        Error.Invalid -> c.ERR_VAL
+        Error.WouldBlock -> c.ERR_WOULDBLOCK
+        Error.InUse -> c.ERR_USE
+        Error.Already -> c.ERR_ALREADY
+        Error.Connected -> c.ERR_ISCONN
+        Error.NotConnected -> c.ERR_CONN
+        Error.Interface -> c.ERR_IF
+        Error.Aborted -> c.ERR_ABRT
+        Error.Reset -> c.ERR_RST
+        Error.Closed -> c.ERR_CLSD
+        Error.Argument -> c.ERR_ARG
+        Error.Unknown(_) -> c.ERR_IF
+
+private[lwip] check(code: i8) -> Result[unit, Error] = if code == c.ERR_OK then Ok(()) else Err(error(code))
+
+// An IPv4 address, held as lwIP holds one: four octets in network order, in one aligned word.
+struct Ip4 derives Eq
+    private[lwip] addr: u32
+
+    // The four octets, most significant first: `ip4(10, 0, 0, 1).octets()[0]` is 10.
+    octets(self) -> [4]u8
+        var word = self.addr
+        val bytes: *u8 = ptr_cast(&word)
+        [bytes[0], bytes[1], bytes[2], bytes[3]]
+
+    is_any(self) -> bool = self.addr == 0
+
+    private[lwip] raw(self) -> c.Ip4Addr = c.Ip4Addr(self.addr)
+
+impl Display for Ip4
+    display(self, out: *Writer, fmt: FormatSpec)
+        var text: [15]u8 = [0; 15]
+        var n = 0usize
+        val o = self.octets()
+        for i in 0..<4usize
+            if i > 0 then
+                text[n] = u8('.')
+                n += 1
+            val v = o[i]
+            if v >= 100 then
+                text[n] = u8('0') + v / 100
+                n += 1
+            if v >= 10 then
+                text[n] = u8('0') + v / 10 % 10
+                n += 1
+            text[n] = u8('0') + v % 10
+            n += 1
+        display_pad(text[0..<n], out, fmt)
+
+// The address `a.b.c.d`.
+ip4(a: u8, b: u8, c: u8, d: u8) -> Ip4
+    var word: u32 = 0
+    val bytes: *u8 = ptr_cast(&word)
+    bytes[0] = a
+    bytes[1] = b
+    bytes[2] = c
+    bytes[3] = d
+    Ip4(word)
+
+// The address lwIP reads as "any": bind to every interface, or no gateway.
+any() -> Ip4 = Ip4(0)
+
+private[lwip] ip_of(raw: *c.Ip4Addr) -> Ip4 = if raw == null then any() else Ip4(raw.addr)
+
+// lwIP's sense of time: milliseconds since some fixed moment, wrapping at 2^32 (lwIP compares
+// deadlines modulo the wrap). A board answers from its tick counter; a test answers from a counter it
+// advances itself.
+trait Clock
+    now_ms(*self) -> u32
+
+private var clock_read: *extern(*u8) -> u32 = null
+private var clock_state: *u8 = null
+private var started: bool = false
+
+// Bring lwIP up, with `clock` as its time. Once per program, before anything else here. lwIP keeps
+// reading `clock` for as long as the program runs, so it stays where it is.
+init[C: Clock](clock: *C) -> Result[unit, Error]
+    if started then return Err(Error.Already)
+    clock_read = &read_clock[C]
+    clock_state = ptr_cast(clock)
+    started = true
+    c.init()
+    Ok(())
+
+// Run every lwIP timer that is due: TCP's retransmissions and delayed ACKs, ARP's cache ageing, the
+// DHCP client's retries. A board calls it from its main loop, at least as often as `next_timeout_ms`
+// asks.
+check_timeouts() = c.check_timeouts()
+
+// How long, in milliseconds, until a timer is due.
+next_timeout_ms() -> u32 = c.timeouts_sleeptime()
+
+private read_clock[C: Clock](state: *u8) -> u32
+    val clock: *C = ptr_cast(state)
+    clock.now_ms()
+
+// lwIP's port calls this for the time (`sys.h`). Before `init` there is none, and it answers 0.
+@export("sys_now")
+private sys_now() -> u32 = if clock_read == null then 0 else clock_read(clock_state)
+
+// A failed lwIP assertion (`arch/cc.h`), which is lwIP finding its own state broken or its API
+// misused. Carrying on would corrupt its pools, so the program stops with lwIP's message, file and
+// line, all three read in place so that nothing is allocated on the way down.
+@export("lwip_sysl_assert")
+private lwip_assert(message: *u8, file: *u8, line: int)
+    panic(c_text(message), c_text(file), long(line))
+
+private c_text(p: *u8) -> string
+    if p == null then return ""
+    var n = 0usize
+    while p[n] != 0
+        n += 1
+    str_view(p[0..<n])
+
+// One protocol's counters, as lwIP keeps them.
+struct Counters
+    sent: u32
+    received: u32
+    dropped: u32
+    checksum_errors: u32
+    length_errors: u32
+    memory_errors: u32
+    routing_errors: u32
+    protocol_errors: u32
+    other_errors: u32
+
+// The protocols lwIP counts for.
+enum Protocol
+    Link
+    Arp
+    Ip
+    Icmp
+    Udp
+    Tcp
+
+// What lwIP has counted for `protocol` since `init`, over every interface.
+counters(protocol: Protocol) -> Counters
+    val p = protocol match
+        Protocol.Link -> 0
+        Protocol.Arp -> 1
+        Protocol.Ip -> 2
+        Protocol.Icmp -> 3
+        Protocol.Udp -> 4
+        Protocol.Tcp -> 5
+    Counters(c.stat(p, 0), c.stat(p, 1), c.stat(p, 2), c.stat(p, 3), c.stat(p, 4), c.stat(p, 5),
+             c.stat(p, 6), c.stat(p, 7), c.stat(p, 8))
+
+// TCP segments lwIP has retransmitted by fast retransmit (three duplicate ACKs), as its MIB-II
+// `tcpRetransSegs` counts them. A retransmission after a timeout is counted in `Tcp`'s `sent` only.
+tcp_retransmits() -> u32 = c.tcp_fast_retransmits()
+
+// How many times lwIP's heap or one of its pools had nothing to give.
+memory_errors() -> u32 = c.memory_errors()
+
+// The version of lwIP compiled in, as `LWIP_VERSION` packs it: major, minor, revision and release
+// candidate, a byte each.
+version() -> u32 = c.LWIP_VERSION

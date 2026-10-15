@@ -1,0 +1,44 @@
+module sh.sysl.lwip
+@no_alloc
+
+import sh.sysl.lwip.c
+import sysl.slices.as_mut_ptr
+
+// A packet lwIP handed a callback: a chain of buffers from its pool. It is lwIP's, and only valid
+// for the length of the callback; the binding gives it back to lwIP when the callback returns, so
+// what the program wants of it is copied out before then.
+struct Packet
+    private[lwip] p: *c.Pbuf
+
+    // Its length in bytes, over the whole chain.
+    len(self) -> usize = usize(self.p.tot_len)
+
+    // Copy bytes starting `offset` bytes in into `out`, as many as fit, answering how many.
+    copy_to(self, out: []u8, offset: usize = 0) -> usize
+        val total = self.len()
+        if offset >= total || out.len == 0 then return 0
+        val n = if out.len < total - offset then out.len else total - offset
+        usize(c.pbuf_copy_partial(self.p, as_mut_ptr(out), u16(n), u16(offset)))
+
+    // The byte `offset` bytes in.
+    at(self, offset: usize) -> u8
+        assert(offset < self.len(), "a packet read past its end")
+        c.pbuf_get_at(self.p, u16(offset))
+
+    // How many buffers the chain is.
+    buffers(self) -> usize
+        var n = 0usize
+        var q = self.p
+        while q != null
+            n += 1
+            q = q.next
+        n
+
+    // The `i`th buffer's bytes, in place: a packet is read without copying by walking these.
+    buffer(self, i: usize) -> []const u8
+        var q = self.p
+        for _ in 0..<i
+            assert(q != null, "a packet has fewer buffers than asked for")
+            q = q.next
+        assert(q != null, "a packet has fewer buffers than asked for")
+        q.payload[0..<usize(q.len)]

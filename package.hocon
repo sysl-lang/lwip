@@ -1,0 +1,32 @@
+// lwIP for sysl: the embedded TCP/IP stack (lwip-tcpip/lwip), vendored unchanged and bound with no
+// operating system under it, for a microcontroller's Ethernet MAC or Wi-Fi chip.
+//
+// This is the block a consumer writes to reach it:
+//
+//     dependencies {
+//       lwip { git = "github.com/sysl-lang/lwip", version = "<the first tag>" }
+//     }
+//
+// The module is `sh.sysl.lwip`. A consumer with its own `lwipopts.h` adds `c_include = ["<dir>"]`
+// to that entry (see `config/lwipopts.h`).
+
+package {
+  name    = "lwip"
+  version = "0.0.1"
+}
+
+// **lwIP's tree is upstream's 2.2.1 `src/`, byte for byte.** Everything this package decides about it
+// is here and in `config/`: which files are compiled, and the two headers lwIP takes from its
+// integrator (`lwipopts.h`, `arch/cc.h`), which a consumer may replace with its own.
+//
+// The list is lwIP's IPv4 core and its Ethernet layer. The rest of the tree is carried and not
+// compiled: IPv6, the sequential and socket APIs (which need an operating system), PPP, 6LoWPAN,
+// SLIP, the bridge, and the applications under `apps/`.
+c {
+  lwip {
+    root    = "c/lwip/src"
+    include = ["include", "../../../config"]
+    sources = ["core/*.c", "core/ipv4/*.c", "netif/ethernet.c"]
+    export  = ["include", "../../../config"]
+  }
+}

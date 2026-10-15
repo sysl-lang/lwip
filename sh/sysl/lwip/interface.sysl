@@ -1,0 +1,154 @@
+module sh.sysl.lwip
+@no_alloc
+
+import sh.sysl.lwip.c
+import sysl.slices.as_ptr
+
+// A device that sends and receives Ethernet frames: an Ethernet MAC, or a Wi-Fi chip in station mode
+// (which hands its host Ethernet frames too, the Pico 2 W's CYW43439 among them).
+//
+// Sending is the one thing lwIP asks of it. Receiving is the other way round: the program reads a
+// frame off the device, from its main loop or its receive interrupt's queue, and hands it to the
+// interface with `Interface.input`.
+trait Driver
+    // Put one frame on the wire: destination and source addresses, EtherType and payload, with no
+    // preamble and no frame check sequence (the hardware adds both). `frame` is the binding's buffer
+    // and only valid during the call, so a driver that sends later copies it.
+    send(*self, frame: []const u8) -> Result[unit, Error]
+
+// The longest frame an interface sends or takes: a 1500-byte payload and the 14-byte header.
+const MAX_FRAME: usize = 1514
+
+private const MTU: u16 = 1500
+
+private const NETIF_WORDS: usize = (c.NETIF_SIZE + 7) / 8
+
+// One network interface: lwIP's `struct netif`, over a driver.
+//
+// **Once `add` has succeeded it stays where it is until `remove`**: lwIP links its address into its
+// list of interfaces, and hands it to every frame it routes there. A board keeps one in a module
+// `var`; a test keeps it in a local that outlives every use. The driver `add` was given stays put
+// for as long, since the interface keeps its address too.
+struct Interface[D: Driver]
+    private netif: [NETIF_WORDS]u64
+    private dev: *D
+    private mac: [6]u8
+    private frame: [MAX_FRAME]u8
+    private added: bool
+
+    // Hand lwIP this interface over the driver `dev`, at `address` on `netmask` with `gateway` (or
+    // `any()` for each, to take them from DHCP), and bring it up with its link up. Both the
+    // interface and `dev` stay where they are from here until `remove`.
+    add(*self, dev: *D, address: Ip4, netmask: Ip4, gateway: Ip4) -> Result[unit, Error]
+        if self.added then return Err(Error.InUse)
+        self.dev = dev
+        var ip = address.raw()
+        var mask = netmask.raw()
+        var gw = gateway.raw()
+        val n = c.netif_add(self.handle(), &ip, &mask, &gw, ptr_cast(self), &start[D], &c.netif_input)
+        if n == null then return Err(Error.Interface)
+        self.added = true
+        c.netif_set_up(self.handle())
+        c.netif_set_link_up(self.handle())
+        Ok(())
+
+    // Take it back from lwIP. Every connection bound to its address is aborted, and from here on it
+    // may move.
+    remove(*self)
+        if !self.added then return
+        c.netif_remove(self.handle())
+        self.added = false
+
+    // Hand lwIP a frame the device received. lwIP copies it into a buffer from its pool, so `frame`
+    // may be reused as soon as this returns; and lwIP answers it, if it needs answering, from inside
+    // this call, through the driver's `send`.
+    input(*self, frame: []const u8) -> Result[unit, Error]
+        if !self.added then return Err(Error.Interface)
+        if frame.len > MAX_FRAME then return Err(Error.Argument)
+        val p = c.pbuf_alloc(c.PBUF_RAW, u16(frame.len), c.PBUF_POOL)
+        if p == null then return Err(Error.OutOfMemory)
+        val took = c.pbuf_take(p, as_ptr(frame), u16(frame.len))
+        if took != c.ERR_OK then
+            c.pbuf_free(p)
+            return Err(error(took))
+        val r = c.netif_input(p, self.handle())
+        if r != c.ERR_OK then
+            c.pbuf_free(p)
+            return Err(error(r))
+        Ok(())
+
+    // The interface packets go out of when no other's subnet holds their destination.
+    set_default(*self) = c.netif_set_default(self.handle())
+
+    // Bring it up or down, as an administrator would.
+    up(*self) = c.netif_set_up(self.handle())
+    down(*self) = c.netif_set_down(self.handle())
+
+    // Tell lwIP the link came up or went down (a cable, or a Wi-Fi association). DHCP starts over
+    // when it comes back.
+    link_up(*self) = c.netif_set_link_up(self.handle())
+    link_down(*self) = c.netif_set_link_down(self.handle())
+
+    // Change its addresses.
+    set_address(*self, address: Ip4, netmask: Ip4, gateway: Ip4)
+        var ip = address.raw()
+        var mask = netmask.raw()
+        var gw = gateway.raw()
+        c.netif_set_addr(self.handle(), &ip, &mask, &gw)
+
+    // Its address, as configured or as DHCP set it.
+    address(*self) -> Ip4 = Ip4(c.netif_ip4(self.handle()))
+
+    // Its hardware address.
+    hardware_address(self) -> [6]u8 = self.mac
+
+    is_added(self) -> bool = self.added
+
+    // Ask for `address`'s hardware address now, with an ARP request, rather than when a packet
+    // first needs it.
+    resolve(*self, address: Ip4) -> Result[unit, Error]
+        var ip = address.raw()
+        check(c.etharp_request(self.handle(), &ip))
+
+    // The hardware address ARP has for `address` on this interface, if it has one yet.
+    arp_entry(*self, address: Ip4) -> Option[[6]u8]
+        var ip = address.raw()
+        var mac: *u8 = null
+        var found: *c.Ip4Addr = null
+        if c.etharp_find_addr(self.handle(), &ip, &mac, &found) < 0 || mac == null then return None
+        Some([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]])
+
+    // Start lwIP's DHCP client. The address arrives with a later `input` or `check_timeouts`;
+    // `dhcp_bound` says when. Its state comes from lwIP's heap.
+    start_dhcp(*self) -> Result[unit, Error] = check(c.dhcp_start(self.handle()))
+
+    // Release the lease and stop the client.
+    stop_dhcp(*self) = c.dhcp_release_and_stop(self.handle())
+
+    // Whether DHCP has bound an address.
+    dhcp_bound(*self) -> bool = c.dhcp_supplied_address(self.handle()) != 0
+
+    private handle(*self) -> *c.Netif = ptr_cast(&self.netif[0])
+end Interface
+
+// An interface with the hardware address `mac`, for a driver of type `D`, not yet handed to lwIP. It
+// may be moved until `add`.
+interface[D: Driver](mac: [6]u8) -> Interface[D] = Interface([0; NETIF_WORDS], null, mac, [0; MAX_FRAME], false)
+
+// lwIP calls this from `netif_add`, with the interface's address in `state`, for the interface to
+// describe itself.
+private start[D: Driver](netif: *c.Netif) -> i8
+    val iface: *Interface[D] = ptr_cast(c.netif_state(netif))
+    c.netif_setup(netif, &iface.mac[0], MTU, &send_frame[D], u8('e'), u8('n'))
+    c.ERR_OK
+
+// lwIP's `linkoutput`: one frame, as a chain of buffers, gathered into the interface's own buffer
+// and handed to the driver.
+private send_frame[D: Driver](netif: *c.Netif, p: *c.Pbuf) -> i8
+    val iface: *Interface[D] = ptr_cast(c.netif_state(netif))
+    val total = usize(p.tot_len)
+    if total > MAX_FRAME then return c.ERR_BUF
+    val n = usize(c.pbuf_copy_partial(p, &iface.frame[0], u16(total), 0))
+    iface.dev.send(iface.frame[0..<n]) match
+        Ok(_) -> c.ERR_OK
+        Err(e) -> code(e)

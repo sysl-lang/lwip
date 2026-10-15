@@ -1,0 +1,241 @@
+// lwIP as C declares it.
+//
+// **Everything that is C lives here**: the declarations below, read out of lwIP's headers, and
+// `lwip_sysl.c` beside them for the fields and macros sysl cannot reach. Nothing here is meant to be
+// called by a program: every answer is an `err_t`, every handle is a pointer into one of lwIP's
+// pools, and every callback is a bare address. The module above turns them into `Result`s, methods
+// and traits, and is what an application imports.
+//
+// The C beside this file, and every `c const` and `c type` below, is compiled with lwIP's include
+// roots and whichever `lwipopts.h` the build uses (the package's, or a consumer's from `c_include`),
+// so a size measured here is the size lwIP's objects were built with.
+
+module sh.sysl.lwip.c
+
+@include("lwip/opt.h")
+@include("lwip/init.h")
+@include("lwip/err.h")
+@include("lwip/pbuf.h")
+@include("lwip/netif.h")
+@include("lwip/tcp.h")
+@include("lwip/udp.h")
+@include("lwip/raw.h")
+@include("lwip/timeouts.h")
+@include("lwip/dhcp.h")
+@include("lwip/etharp.h")
+@include("lwip/inet_chksum.h")
+@include("netif/ethernet.h")
+@include("stddef.h")
+
+// What every function answers, as `err.h` numbers them.
+c const
+    ERR_OK:         i8 = "ERR_OK"
+    ERR_MEM:        i8 = "ERR_MEM"
+    ERR_BUF:        i8 = "ERR_BUF"
+    ERR_TIMEOUT:    i8 = "ERR_TIMEOUT"
+    ERR_RTE:        i8 = "ERR_RTE"
+    ERR_INPROGRESS: i8 = "ERR_INPROGRESS"
+    ERR_VAL:        i8 = "ERR_VAL"
+    ERR_WOULDBLOCK: i8 = "ERR_WOULDBLOCK"
+    ERR_USE:        i8 = "ERR_USE"
+    ERR_ALREADY:    i8 = "ERR_ALREADY"
+    ERR_ISCONN:     i8 = "ERR_ISCONN"
+    ERR_CONN:       i8 = "ERR_CONN"
+    ERR_IF:         i8 = "ERR_IF"
+    ERR_ABRT:       i8 = "ERR_ABRT"
+    ERR_RST:        i8 = "ERR_RST"
+    ERR_CLSD:       i8 = "ERR_CLSD"
+    ERR_ARG:        i8 = "ERR_ARG"
+
+// The two enums `pbuf_alloc` takes, and `ssize_t`. Each width is the C compiler's to decide (a board's
+// ABI packs an enum into a byte, and `ssize_t` is a long on one machine and an int on another), so it
+// is asked rather than assumed.
+c type
+    PbufLayer = "pbuf_layer"
+    PbufType  = "pbuf_type"
+    SSize     = "ssize_t"
+
+c const
+    PBUF_RAW:       PbufLayer = "PBUF_RAW"
+    PBUF_TRANSPORT: PbufLayer = "PBUF_TRANSPORT"
+    PBUF_RAM:       PbufType  = "PBUF_RAM"
+    PBUF_POOL:      PbufType  = "PBUF_POOL"
+
+// What `lwipopts.h` configured, as the binding needs it.
+c const
+    TCP_MSS:            u16 = "TCP_MSS"
+    TCP_WND:            u32 = "TCP_WND"
+    TCP_SND_BUF:        u32 = "TCP_SND_BUF"
+    MEMP_NUM_TCP_PCB:   int = "MEMP_NUM_TCP_PCB"
+    MEMP_NUM_UDP_PCB:   int = "MEMP_NUM_UDP_PCB"
+    MEMP_NUM_PBUF:      int = "MEMP_NUM_PBUF"
+    PBUF_POOL_SIZE:     int = "PBUF_POOL_SIZE"
+    PBUF_POOL_BUFSIZE:  int = "PBUF_POOL_BUFSIZE"
+    MEM_SIZE:           int = "MEM_SIZE"
+    CHECKSUM_GEN_TCP:   int = "CHECKSUM_GEN_TCP"
+    CHECKSUM_GEN_UDP:   int = "CHECKSUM_GEN_UDP"
+    CHECKSUM_GEN_IP:    int = "CHECKSUM_GEN_IP"
+    LWIP_DHCP:          int = "LWIP_DHCP"
+    LWIP_VERSION:       u32 = "LWIP_VERSION"
+    ETH_HWADDR_LEN:     usize = "ETH_HWADDR_LEN"
+    SIZEOF_ETH_HDR:     usize = "SIZEOF_ETH_HDR"
+
+c const
+    TCP_WRITE_FLAG_COPY: u8 = "TCP_WRITE_FLAG_COPY"
+    TCP_WRITE_FLAG_MORE: u8 = "TCP_WRITE_FLAG_MORE"
+    IP_PROTO_ICMP:       u8 = "IP_PROTO_ICMP"
+    IP_PROTO_UDP:        u8 = "IP_PROTO_UDP"
+    IP_PROTO_TCP:        u8 = "IP_PROTO_TCP"
+
+// `enum tcp_state`, in the order `tcpbase.h` lists it.
+c const
+    CLOSED:      int = "CLOSED"
+    LISTEN:      int = "LISTEN"
+    SYN_SENT:    int = "SYN_SENT"
+    SYN_RCVD:    int = "SYN_RCVD"
+    ESTABLISHED: int = "ESTABLISHED"
+    FIN_WAIT_1:  int = "FIN_WAIT_1"
+    FIN_WAIT_2:  int = "FIN_WAIT_2"
+    CLOSE_WAIT:  int = "CLOSE_WAIT"
+    CLOSING:     int = "CLOSING"
+    LAST_ACK:    int = "LAST_ACK"
+    TIME_WAIT:   int = "TIME_WAIT"
+
+// The handles lwIP hands out. Every one is an element of one of lwIP's pools, owned by lwIP: it
+// stays where it is until lwIP frees it, which is the one thing the binding relies on.
+opaque struct TcpPcb
+opaque struct UdpPcb
+opaque struct RawPcb
+
+// `struct netif` belongs to the integrator, who gives lwIP its storage. Its layout depends on
+// `lwipopts.h`, so sysl holds it as words of the size the header says and reaches its fields
+// through `lwip_sysl.c`.
+opaque struct Netif
+
+c const
+    NETIF_SIZE:  usize = "sizeof(struct netif)"
+    NETIF_ALIGN: usize = "_Alignof(struct netif)"
+
+// `struct pbuf`, field for field: one buffer of a chain holding a packet.
+struct Pbuf
+    next: *Pbuf
+    payload: *u8
+    tot_len: u16
+    len: u16
+    type_internal: u8
+    flags: u8
+    refs: u8
+    if_idx: u8
+
+c const
+    PBUF_SIZE:     usize = "sizeof(struct pbuf)"
+    PBUF_PAYLOAD:  usize = "offsetof(struct pbuf, payload)"
+    PBUF_TOT_LEN:  usize = "offsetof(struct pbuf, tot_len)"
+    PBUF_LEN:      usize = "offsetof(struct pbuf, len)"
+    PBUF_REF_SIZE: usize = "sizeof(LWIP_PBUF_REF_T)"
+
+// `ip4_addr_t` (and `ip_addr_t`, which is the same with IPv6 compiled out): the address in network
+// byte order.
+struct Ip4Addr
+    addr: u32
+
+c const
+    IP_ADDR_SIZE:  usize = "sizeof(ip_addr_t)"
+    IP4_ADDR_SIZE: usize = "sizeof(ip4_addr_t)"
+
+@assert(sizeof(Pbuf) == PBUF_SIZE, "sysl's Pbuf is not the size of 'struct pbuf'")
+@assert(offsetof(Pbuf, payload) == PBUF_PAYLOAD, "Pbuf.payload is not where 'struct pbuf' has it")
+@assert(offsetof(Pbuf, tot_len) == PBUF_TOT_LEN, "Pbuf.tot_len is not where 'struct pbuf' has it")
+@assert(offsetof(Pbuf, len) == PBUF_LEN, "Pbuf.len is not where 'struct pbuf' has it")
+@assert(PBUF_REF_SIZE == 1, "LWIP_PBUF_REF_T is wider than the u8 sysl's Pbuf declares")
+@assert(IP_ADDR_SIZE == 4, "ip_addr_t is not one IPv4 address: the binding is IPv4 only")
+@assert(IP4_ADDR_SIZE == 4, "ip4_addr_t is not four bytes")
+@assert(NETIF_ALIGN <= 8, "'struct netif' wants a stronger alignment than an array of u64 gives")
+
+// Bringing lwIP up, and its timers.
+extern "lwip_init" init()
+extern "sys_check_timeouts" check_timeouts()
+extern "sys_timeouts_sleeptime" timeouts_sleeptime() -> u32
+
+// Interfaces.
+extern "netif_add" netif_add(netif: *Netif, ip: *Ip4Addr, netmask: *Ip4Addr, gw: *Ip4Addr, state: *u8,
+                             init: *extern(*Netif) -> i8, input: *extern(*Pbuf, *Netif) -> i8) -> *Netif
+extern "netif_remove" netif_remove(netif: *Netif)
+extern "netif_set_default" netif_set_default(netif: *Netif)
+extern "netif_set_up" netif_set_up(netif: *Netif)
+extern "netif_set_down" netif_set_down(netif: *Netif)
+extern "netif_set_link_up" netif_set_link_up(netif: *Netif)
+extern "netif_set_link_down" netif_set_link_down(netif: *Netif)
+extern "netif_set_addr" netif_set_addr(netif: *Netif, ip: *Ip4Addr, netmask: *Ip4Addr, gw: *Ip4Addr)
+extern "netif_input" netif_input(p: *Pbuf, netif: *Netif) -> i8
+extern "etharp_request" etharp_request(netif: *Netif, ip: *Ip4Addr) -> i8
+extern "etharp_find_addr" etharp_find_addr(netif: *Netif, ip: *Ip4Addr, mac: **u8, found: **Ip4Addr) -> SSize
+
+// DHCP.
+extern "dhcp_start" dhcp_start(netif: *Netif) -> i8
+extern "dhcp_stop" dhcp_stop(netif: *Netif)
+extern "dhcp_release_and_stop" dhcp_release_and_stop(netif: *Netif)
+extern "dhcp_supplied_address" dhcp_supplied_address(netif: *Netif) -> u8
+extern "dhcp_cleanup" dhcp_cleanup(netif: *Netif)
+
+// Packet buffers.
+extern "pbuf_alloc" pbuf_alloc(layer: PbufLayer, length: u16, kind: PbufType) -> *Pbuf
+extern "pbuf_free" pbuf_free(p: *Pbuf) -> u8
+extern "pbuf_take" pbuf_take(p: *Pbuf, data: *u8, len: u16) -> i8
+extern "pbuf_copy_partial" pbuf_copy_partial(p: *Pbuf, out: *u8, len: u16, offset: u16) -> u16
+extern "pbuf_get_at" pbuf_get_at(p: *Pbuf, offset: u16) -> u8
+
+// TCP.
+extern "tcp_new" tcp_new() -> *TcpPcb
+extern "tcp_arg" tcp_arg(pcb: *TcpPcb, arg: *u8)
+extern "tcp_recv" tcp_recv(pcb: *TcpPcb, recv: *extern(*u8, *TcpPcb, *Pbuf, i8) -> i8)
+extern "tcp_sent" tcp_sent(pcb: *TcpPcb, sent: *extern(*u8, *TcpPcb, u16) -> i8)
+extern "tcp_err" tcp_err(pcb: *TcpPcb, err: *extern(*u8, i8) -> unit)
+extern "tcp_accept" tcp_accept(pcb: *TcpPcb, accept: *extern(*u8, *TcpPcb, i8) -> i8)
+extern "tcp_poll" tcp_poll(pcb: *TcpPcb, poll: *extern(*u8, *TcpPcb) -> i8, interval: u8)
+extern "tcp_bind" tcp_bind(pcb: *TcpPcb, ip: *Ip4Addr, port: u16) -> i8
+extern "tcp_listen_with_backlog_and_err" tcp_listen(pcb: *TcpPcb, backlog: u8, err: *i8) -> *TcpPcb
+extern "tcp_connect" tcp_connect(pcb: *TcpPcb, ip: *Ip4Addr, port: u16,
+                                 connected: *extern(*u8, *TcpPcb, i8) -> i8) -> i8
+extern "tcp_write" tcp_write(pcb: *TcpPcb, data: *u8, len: u16, flags: u8) -> i8
+extern "tcp_output" tcp_output(pcb: *TcpPcb) -> i8
+extern "tcp_recved" tcp_recved(pcb: *TcpPcb, len: u16)
+extern "tcp_close" tcp_close(pcb: *TcpPcb) -> i8
+extern "tcp_shutdown" tcp_shutdown(pcb: *TcpPcb, shut_rx: int, shut_tx: int) -> i8
+extern "tcp_abort" tcp_abort(pcb: *TcpPcb)
+extern "tcp_tcp_get_tcp_addrinfo" tcp_addrinfo(pcb: *TcpPcb, local: int, ip: *Ip4Addr, port: *u16) -> i8
+
+// UDP.
+extern "udp_new" udp_new() -> *UdpPcb
+extern "udp_remove" udp_remove(pcb: *UdpPcb)
+extern "udp_bind" udp_bind(pcb: *UdpPcb, ip: *Ip4Addr, port: u16) -> i8
+extern "udp_connect" udp_connect(pcb: *UdpPcb, ip: *Ip4Addr, port: u16) -> i8
+extern "udp_disconnect" udp_disconnect(pcb: *UdpPcb)
+extern "udp_send" udp_send(pcb: *UdpPcb, p: *Pbuf) -> i8
+extern "udp_sendto" udp_sendto(pcb: *UdpPcb, p: *Pbuf, ip: *Ip4Addr, port: u16) -> i8
+extern "udp_recv" udp_recv(pcb: *UdpPcb, recv: *extern(*u8, *UdpPcb, *Pbuf, *Ip4Addr, u16) -> unit, arg: *u8)
+
+// Raw IP, which is how a program sends what lwIP has no API for: an ICMP echo request, say.
+extern "raw_new" raw_new(protocol: u8) -> *RawPcb
+extern "raw_remove" raw_remove(pcb: *RawPcb)
+extern "raw_bind" raw_bind(pcb: *RawPcb, ip: *Ip4Addr) -> i8
+extern "raw_sendto" raw_sendto(pcb: *RawPcb, p: *Pbuf, ip: *Ip4Addr) -> i8
+extern "raw_recv" raw_recv(pcb: *RawPcb, recv: *extern(*u8, *RawPcb, *Pbuf, *Ip4Addr) -> u8, arg: *u8)
+
+// The Internet checksum, over bytes in memory.
+extern "inet_chksum" inet_chksum(data: *u8, len: u16) -> u16
+
+// `lwip_sysl.c`.
+extern "lwip_sysl_netif_setup" netif_setup(netif: *Netif, mac: *u8, mtu: u16,
+                                           linkoutput: *extern(*Netif, *Pbuf) -> i8, name0: u8, name1: u8)
+extern "lwip_sysl_netif_state" netif_state(netif: *Netif) -> *u8
+extern "lwip_sysl_netif_ip4" netif_ip4(netif: *Netif) -> u32
+extern "lwip_sysl_netif_hwaddr" netif_hwaddr(netif: *Netif) -> *u8
+extern "lwip_sysl_tcp_sndbuf" tcp_sndbuf(pcb: *TcpPcb) -> u16
+extern "lwip_sysl_tcp_sndqueuelen" tcp_sndqueuelen(pcb: *TcpPcb) -> u16
+extern "lwip_sysl_tcp_mss" tcp_mss(pcb: *TcpPcb) -> u16
+extern "lwip_sysl_tcp_state" tcp_state(pcb: *TcpPcb) -> int
+extern "lwip_sysl_tcp_nagle" tcp_nagle(pcb: *TcpPcb, on: int)
+extern "lwip_sysl_stat" stat(proto: int, field: int) -> u32
+extern "lwip_sysl_tcp_fast_retransmits" tcp_fast_retransmits() -> u32
+extern "lwip_sysl_memory_errors" memory_errors() -> u32
