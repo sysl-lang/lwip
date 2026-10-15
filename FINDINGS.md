@@ -40,7 +40,12 @@ is worked around in the vendored C, which is upstream 2.2.1 byte for byte.
     loop frame. Possibly covered by sysl's `addr-fold` branch.
 
 **Status: all accepted for alpha.14.**
-- vendored-c round 2 covers 1, 2, 3, 5 (documented), 6 and 8.
+- vendored-c round 2 covers 1, 2, 3, 5 (documented), 6 and 8. **Built and adopted** against edb75ec4:
+  1 (`build-lib` host passes), 2 (`export = true`), 3 (`"/config"`), 5 (the pattern is in packages.md).
+  Still rough: 6 (a refused probe now quotes clang's one error, but the sysl errors that follow, "an
+  array length must be a constant" and "unknown type 'c.Netif'", still print, 25 in all, and the span
+  points at the block's first entry `ERR_OK`, not the broken line); 8 not seen. `build-lib --target
+  thumbv7em-freestanding` stops on `'inttypes.h' file not found`, the expected libc gap (4).
 - `tests-files` covers 7, 9 and 10.
 - `addr-fold` covers 11.
 - `lib-override` covers nested path dependencies.
