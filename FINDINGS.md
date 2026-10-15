@@ -39,4 +39,11 @@ is worked around in the vendored C, which is upstream 2.2.1 byte for byte.
     constructor and a board cannot keep one in module storage. The board example keeps its state in a
     loop frame. Possibly covered by sysl's `addr-fold` branch.
 
-**Status: reported to `sysl`.**
+**Status: all accepted for alpha.14.**
+- vendored-c round 2 covers 1, 2, 3, 5 (documented), 6 and 8.
+- `tests-files` covers 7, 9 and 10.
+- `addr-fold` covers 11.
+- `lib-override` covers nested path dependencies.
+- `target-deps` (`if = "!libc"`) covers 4.
+
+The test reshapes around 9 and 10 come out when alpha.14 ships.
