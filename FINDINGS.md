@@ -28,10 +28,12 @@ is worked around in the vendored C, which is upstream 2.2.1 byte for byte.
 9. **A method of a type declared in a `@tests` file may not call that file's helpers (bug).** It is
    refused with "only another such file, or a '@test' function, may name it", which contradicts
    attributes.md. The test driver holds a `*Wire` and a struct for the stream pattern instead.
-   *Reproduction being confirmed.*
+   Reproduced on alpha.12 and the prerelease.
 10. **A test at the project root that reads a module `var` silently vanishes (bug).** The run says "1
     passed" with exit 0; the same test under a module directory runs and fails as it should. The
-    override test keeps its clock in a local meanwhile. *Reproduction being confirmed.*
+    override test keeps its clock in a local meanwhile. Reproduced on alpha.12 and the prerelease: the
+    trigger is a `var` declared in the root `@tests` file itself, and the run reports "1 passed" of two
+    declared tests.
 11. **A `const` constructor cannot store `null` (gap).** `const holder(n) -> Holder = Holder(null, n)` is
     refused ("an address exists only when the program runs"), so `Interface` has no constant-data
     constructor and a board cannot keep one in module storage. The board example keeps its state in a
