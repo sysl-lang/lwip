@@ -19,11 +19,11 @@ Pico 2 W's CYW43439 hands its host Ethernet frames, and its SDK networks through
 
 ```hocon
 dependencies {
-  lwip { git = "github.com/sysl-lang/lwip", version = "<the first tag>" }
+  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.0" }
 }
 ```
 
-The module is `sh.sysl.lwip`. It needs sysl 0.1.0-alpha.14, the first release with the vendored-C
+The module is `sh.sysl.lwip`. It needs sysl 0.1.1, which has the vendored-C
 manifest block (`c { … }`, `c_include`).
 
 ## Using it
@@ -137,7 +137,7 @@ binding's C and every size the binding measures:
 
 ```hocon
 dependencies {
-  lwip { git = "github.com/sysl-lang/lwip", version = "<the first tag>", c_include = ["config"] }
+  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.0", c_include = ["config"] }
 }
 ```
 
@@ -222,7 +222,7 @@ address test, and the oracle); the route-by-source hook removed (8).
 clang command (lwIP's 32 files, the shim, the sysl code units) and the link carried the flag, and the
 test binary imports `__asan_init`, `__asan_memcpy` and 12 `__asan_report_*` hooks.
 
-**Bare metal** (`thumb-freestanding`) waits for alpha.14's target-only dependencies: lwIP's C needs a C
+**Bare metal** (`thumb-freestanding`) waits for a later piece of work, the use of target-only dependencies: lwIP's C needs a C
 library's headers there, which `sysl-lang/cstd` supplies to the packages that depend on it, and this
 package cannot depend on cstd only where there is no libc. In a workspace where cstd carries its
 `c { libc { export = ["include"], libc = true } }` block and lwIP depends on it, `sysl build-c` of a

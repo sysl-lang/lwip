@@ -10,6 +10,8 @@ struct Still
 impl Clock for Still
     now_ms(*self) -> u32 = self.ms
 
+var clock: Still = Still(0)
+
 @test("the package's probes read this project's lwipopts.h, not the package's")
 probes_read_the_consumers_options()
     assert_eq(c.MEMP_NUM_TCP_PCB, 13)
@@ -20,8 +22,6 @@ probes_read_the_consumers_options()
 
 @test("lwIP's own objects were compiled with this project's options: thirteen TCP pcbs and no more, each with a 2920-byte send buffer")
 objects_read_the_consumers_options()
-    // lwIP reads the clock for the rest of the program, and this test is the whole program.
-    var clock = Still(0)
     init(&clock).unwrap()
     var held = 0
     loop

@@ -4,7 +4,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       lwip { git = "github.com/sysl-lang/lwip", version = "<the first tag>" }
+//       lwip { git = "github.com/sysl-lang/lwip", version = "0.1.0" }
 //     }
 //
 // The module is `sh.sysl.lwip`. A consumer with its own `lwipopts.h` adds `c_include = ["<dir>"]`
@@ -12,7 +12,7 @@
 
 package {
   name    = "lwip"
-  version = "0.0.1"
+  version = "0.1.0"
 }
 
 // **lwIP's tree is upstream's 2.2.1 `src/`, byte for byte.** Everything this package decides about it

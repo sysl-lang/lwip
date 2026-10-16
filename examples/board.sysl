@@ -48,13 +48,14 @@ impl Listener for Server
         tcp.attach(&self.conn)
         Verdict.Continue
 
-// Everything lwIP keeps the address of lives in this frame, which never returns.
+// What lwIP keeps the address of lives in module storage.
+var ticks: Ticks = Ticks(0)
+var mac: Mac = Mac(0)
+var eth: Interface[Mac] = interface([0x02, 0, 0, 0, 0, 0x01])
+var server: Server = Server(Echo(false))
+
 @export("net_run")
 run(read_tick: *extern() -> u32, next_frame: *extern(*u8) -> usize) -> int
-    var ticks = Ticks(0)
-    var mac = Mac(0)
-    var eth: Interface[Mac] = interface([0x02, 0, 0, 0, 0, 0x01])
-    var server = Server(Echo(false))
     init(&ticks).unwrap()
     eth.add(&mac, ip4(192, 168, 1, 50), ip4(255, 255, 255, 0), ip4(192, 168, 1, 1)).unwrap()
     eth.set_default()

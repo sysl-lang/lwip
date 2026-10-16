@@ -39,7 +39,9 @@ is worked around in the vendored C, which is upstream 2.2.1 byte for byte.
     constructor and a board cannot keep one in module storage. The board example keeps its state in a
     loop frame. Possibly covered by sysl's `addr-fold` branch.
 
-**Status: all accepted for alpha.14.**
+**Status: fixed in sysl 0.1.x; workarounds removed.**
+- 9, 10 and 11: fixed in sysl 0.1.1; workaround removed. The wire tests now name the file's module storage and a free function from their types' methods; the override test keeps its clock in a module `var` and both tests run (2 of 2); the board example keeps its state in module storage.
+- Accepted for alpha.14, and adopted:
 - vendored-c round 2 covers 1, 2, 3, 5 (documented), 6 and 8. **Built and adopted** against edb75ec4:
   1 (`build-lib` host passes), 2 (`export = true`), 3 (`"/config"`), 5 (the pattern is in packages.md).
   Still rough: 6 (a refused probe now quotes clang's one error, but the sysl errors that follow, "an
@@ -50,5 +52,3 @@ is worked around in the vendored C, which is upstream 2.2.1 byte for byte.
 - `addr-fold` covers 11.
 - `lib-override` covers nested path dependencies.
 - `target-deps` (`if = "!libc"`) covers 4.
-
-The test reshapes around 9 and 10 come out when alpha.14 ships.

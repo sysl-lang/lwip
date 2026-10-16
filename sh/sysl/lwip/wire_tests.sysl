@@ -48,7 +48,6 @@ struct Frame
 // The wire: every frame offered, in order, with every `drop_every`th one lost, and a pcap capture of
 // every frame that was not, stamped with the test clock.
 struct Wire
-    clock: *TestClock
     bytes: Buf[u8]
     frames: Buf[Frame]
     next: usize
@@ -77,7 +76,7 @@ struct Wire
         self.pcap.extend(h[..])
 
     private record(*self, frame: []const u8)
-        val ms = self.clock.ms
+        val ms = clock.ms
         var h: [16]u8 = [0; 16]
         put_u32_le(h[0..<4], ms / 1000)
         put_u32_le(h[4..<8], ms % 1000 * 1000)
@@ -88,18 +87,17 @@ struct Wire
 
 // One end of the wire, as an interface's driver sees it.
 struct Port
-    wire: *Wire
     side: int
 
 impl Driver for Port
     send(*self, frame: []const u8) -> Result[unit, Error]
-        self.wire.offer(1 - self.side, frame)
+        wire.offer(1 - self.side, frame)
         Ok(())
 
 var clock: TestClock = TestClock(1000)
-var wire: Wire = Wire(&clock, buf(), buf(), 0, 0, 0, 0, buf())
-var port_a: Port = Port(&wire, 0)
-var port_b: Port = Port(&wire, 1)
+var wire: Wire = Wire(buf(), buf(), 0, 0, 0, 0, buf())
+var port_a: Port = Port(0)
+var port_b: Port = Port(1)
 var a: Interface[Port] = interface(MAC_A)
 var b: Interface[Port] = interface(MAC_B)
 
@@ -142,18 +140,15 @@ run_until(limit_ms: u32, done: () -> bool)
 
 // The bytes of one direction of a stream. Not periodic in any length a TCP segment has, so a segment
 // delivered twice or out of place shows.
-struct Pattern
-    seed: usize
-
-    at(self, k: usize) -> u8 = u8((k * 31 + k / 251 + self.seed) % 256)
+pattern_at(seed: usize, k: usize) -> u8 = u8((k * 31 + k / 251 + seed) % 256)
 
 // One end of a TCP connection that sends `to_send` bytes of its pattern and checks every byte it
 // receives against the peer's.
 struct Stream
     tcp: Option[Tcp]
     to_send: usize
-    out: Pattern
-    expect: Pattern
+    out: usize
+    expect: usize
     written: usize
     acked: usize
     got: usize
@@ -167,7 +162,7 @@ struct Stream
         while self.written < self.to_send
             val n = if self.to_send - self.written < 1460 then self.to_send - self.written else 1460
             for i in 0..<n
-                chunk[i] = self.out.at(self.written + i)
+                chunk[i] = pattern_at(self.out, self.written + i)
             val took = tcp.write(chunk[0..<n]).unwrap()
             if took == 0 then break
             self.written += took
@@ -184,7 +179,7 @@ impl Connection for Stream
         while at < data.len()
             val n = data.copy_to(chunk[..], at)
             for i in 0..<n
-                if chunk[i] != self.expect.at(self.got + i) then self.mismatches += 1
+                if chunk[i] != pattern_at(self.expect, self.got + i) then self.mismatches += 1
             self.got += n
             at += n
         Verdict.Continue
@@ -206,7 +201,7 @@ impl Connection for Stream
         self.failure = Some(error)
 
 stream(to_send: usize, seed_out: usize, seed_in: usize) -> Stream =
-    Stream(None, to_send, Pattern(seed_out), Pattern(seed_in), 0, 0, 0, 0, false, false, None)
+    Stream(None, to_send, seed_out, seed_in, 0, 0, 0, 0, false, false, None)
 
 // A listener that hands its one connection to `conn`.
 struct Server
@@ -222,8 +217,8 @@ impl Listener for Server
         self.conn.fill(tcp)
         Verdict.Continue
 
-var client: Stream = Stream(None, 0, Pattern(0), Pattern(0), 0, 0, 0, 0, false, false, None)
-var server: Server = Server(Stream(None, 0, Pattern(0), Pattern(0), 0, 0, 0, 0, false, false, None), 0)
+var client: Stream = Stream(None, 0, 0, 0, 0, 0, 0, 0, false, false, None)
+var server: Server = Server(Stream(None, 0, 0, 0, 0, 0, 0, 0, false, false, None), 0)
 
 client_tcp() -> Tcp = client.tcp.unwrap()
 server_tcp() -> Tcp = server.conn.tcp.unwrap()
