@@ -1,0 +1,53 @@
+module sh.sysl.lwip
+@tests
+
+// cstd as lwIP's C library on a board. `package.hocon` takes cstd with `if = "!libc"`, so for a
+// bare-metal target lwIP's 32 C files compile against cstd's headers and the archive carries cstd's
+// definitions of the libc functions they call; on the host the dependency is dropped and the real
+// libc answers. `examples/board.sysl` is the project built, since an archive of the whole stack is
+// what a board links.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.make_dir_all
+import sysl.process.capture
+import sysl.testing.compiler
+import sysl.text.{Search, split}
+
+// lwIP's own entry points, from the core, the IPv4 layer, the Ethernet layer, and the binding's export.
+private val entry_points: []string = ["net_run", "tcp_write", "ip4_input", "ethernet_input", "pbuf_alloc"]
+
+// The libc functions lwIP's C calls, which cstd has to define because nothing else on a board does.
+private val libc_calls: []string = ["memcpy", "memset", "memcmp", "memmove", "strlen", "atoi"]
+
+// The global symbols the archive `build-c` writes for the board example defines, one name per line.
+private board_defines(target: string) -> string
+    val dir = f".sysl/bare-tests/$target"
+    make_dir_all(dir).unwrap()
+    val lib = f"$dir/libboard.a"
+    var args: Buf[string] = buf()
+    for a in ["build-c", "examples/board.sysl", "-o", lib, "--target", target] do args.push(a)
+    val built = capture(compiler(), args.view(), stderr = true).unwrap()
+    if !built.status.ok() then panic(f"build-c of the board for $target failed:\n${built.err.unwrap_or("")}")
+    val listed = capture("nm", ["-g", lib]).unwrap()
+    assert(listed.status.ok())
+    var defined = "\n"
+    for line in split(listed.text, "\n")
+        val t = line.index_of(" T ")
+        if t.is_some() then defined += f"${line[t.unwrap() + 3..<line.len]}\n"
+    defined
+
+private bare_case(target: string)
+    val defined = board_defines(target)
+    for n in entry_points
+        if !defined.contains(f"\n$n\n") then panic(f"$target: the archive does not define lwIP's $n")
+    for n in libc_calls
+        if !defined.contains(f"\n$n\n") then panic(f"$target: the archive does not define $n, so cstd was not lwIP's libc")
+
+@test("on thumbv7em lwIP compiles against cstd's headers and the archive defines what it calls")
+bare_thumbv7em() = bare_case("thumbv7em-freestanding")
+
+@test("on thumbv6m lwIP compiles against cstd's headers and the archive defines what it calls")
+bare_thumbv6m() = bare_case("thumbv6m-freestanding")
+
+@test("on riscv32 lwIP compiles against cstd's headers and the archive defines what it calls")
+bare_riscv32() = bare_case("riscv32-freestanding")

@@ -133,7 +133,7 @@ end Interface
 
 // An interface with the hardware address `mac`, for a driver of type `D`, not yet handed to lwIP. It
 // may be moved until `add`.
-interface[D: Driver](mac: [6]u8) -> Interface[D] = Interface([0; NETIF_WORDS], null, mac, [0; MAX_FRAME], false)
+const interface[D: Driver](mac: [6]u8) -> Interface[D] = Interface([0; NETIF_WORDS], null, mac, [0; MAX_FRAME], false)
 
 // lwIP calls this from `netif_add`, with the interface's address in `state`, for the interface to
 // describe itself.

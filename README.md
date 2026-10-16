@@ -19,12 +19,12 @@ Pico 2 W's CYW43439 hands its host Ethernet frames, and its SDK networks through
 
 ```hocon
 dependencies {
-  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.0" }
+  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.1" }
 }
 ```
 
-The module is `sh.sysl.lwip`. It needs sysl 0.1.1, which has the vendored-C
-manifest block (`c { … }`, `c_include`).
+The module is `sh.sysl.lwip`. It needs sysl 0.1.2 or later, which has the vendored-C
+manifest block (`c { … }`, `c_include`) and target-only dependencies (`if = "!libc"`).
 
 ## Using it
 
@@ -137,7 +137,7 @@ binding's C and every size the binding measures:
 
 ```hocon
 dependencies {
-  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.0", c_include = ["config"] }
+  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.1", c_include = ["config"] }
 }
 ```
 
@@ -218,16 +218,18 @@ with lwIP's own checking off too, so only tcpdump can tell (the oracle: `cksum 0
 given the wrong hardware address (the ARP test and the oracle); an address's octets reversed (the
 address test, and the oracle); the route-by-source hook removed (8).
 
-**AddressSanitizer**: `SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .` passes 15/15; every
+**AddressSanitizer**: `SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .` passes 18/18; every
 clang command (lwIP's 32 files, the shim, the sysl code units) and the link carried the flag, and the
-test binary imports `__asan_init`, `__asan_memcpy` and 12 `__asan_report_*` hooks.
+test binary imports 36 `__asan_*` symbols.
 
-**Bare metal** (`thumb-freestanding`) waits for a later piece of work, the use of target-only dependencies: lwIP's C needs a C
-library's headers there, which `sysl-lang/cstd` supplies to the packages that depend on it, and this
-package cannot depend on cstd only where there is no libc. In a workspace where cstd carries its
-`c { libc { export = ["include"], libc = true } }` block and lwIP depends on it, `sysl build-c` of a
-board project for `thumb-freestanding` builds lwIP, the binding and cstd into one archive whose only
-outside references are the standard module's (`malloc`, `free`, `abort`, `exit`, `write`).
+**Bare metal.** The package builds for boards with `sysl-lang/cstd` as its C library: the dependency is
+`if = "!libc"`, so on a target with no libc lwIP's C compiles against cstd's headers and the archive
+carries cstd's `memcpy`, `memset`, `strlen` and the rest, and on the host the real libc answers. The
+suite builds `examples/board.sysl` with `build-c` for `thumbv7em-freestanding`, `thumbv6m-freestanding`
+and `riscv32-freestanding`, and checks with `nm` that the archive defines lwIP's entry points and
+cstd's definitions of what lwIP calls. It needs sysl 0.1.2 or later. A board keeps lwIP's state in
+module storage, so `interface` is a `const` function and a `var eth: Interface[Mac] = interface(…)` is
+constant data, which a target with no loader requires.
 
 ## Vendored version
 

@@ -51,4 +51,5 @@ is worked around in the vendored C, which is upstream 2.2.1 byte for byte.
 - `tests-files` covers 7, 9 and 10.
 - `addr-fold` covers 11.
 - `lib-override` covers nested path dependencies.
-- `target-deps` (`if = "!libc"`) covers 4.
+- `target-deps` (`if = "!libc"`) covers 4, built and adopted in 0.1.1: `build-lib` and `build-c` for
+  `thumbv7em-freestanding`, `thumbv6m-freestanding` and `riscv32-freestanding` pass with cstd as libc.
