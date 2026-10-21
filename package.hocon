@@ -18,7 +18,7 @@ package {
 // On a board there is no C library, so lwIP's C is compiled against cstd's headers and links cstd's
 // definitions; on the host the dependency is dropped and the real libc answers.
 dependencies {
-  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.0", if = "!libc" }
+  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.4", if = "!libc" }
 }
 
 // **lwIP's tree is upstream's 2.2.1 `src/`, byte for byte.** Everything this package decides about it
