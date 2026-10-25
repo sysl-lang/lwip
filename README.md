@@ -14,7 +14,7 @@ Pico 2 W's CYW43439 hands its host Ethernet frames, and its SDK networks through
   runs lwIP's timers from its main loop; lwIP answers through the program's driver and through traits
   the program implements. Between those calls nothing runs, and nothing needs a lock.
 - **lwIP's tree is upstream's, byte for byte.** What the package decides about it — which files are
-  compiled, and the configuration lwIP takes from its integrator — is in `package.hocon`'s `c` block
+  compiled, and the configuration lwIP takes from its integrator — is in `sysl.hocon`'s `c` block
   and in `config/`, and a consumer can replace the configuration with its own.
 
 ```hocon

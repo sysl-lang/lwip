@@ -3,6 +3,7 @@ module sh.sysl.lwip
 
 import sh.sysl.lwip.c
 import sysl.slices.as_ptr
+import sysl.raw.ptr_cast
 
 // What a TCP callback tells lwIP to do next.
 enum Verdict

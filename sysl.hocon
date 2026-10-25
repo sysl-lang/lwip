@@ -4,7 +4,7 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       lwip { git = "github.com/sysl-lang/lwip", version = "0.1.1" }
+//       lwip { git = "github.com/sysl-lang/lwip", version = "0.1.2" }
 //     }
 //
 // The module is `sh.sysl.lwip`. A consumer with its own `lwipopts.h` adds `c_include = ["<dir>"]`
@@ -12,13 +12,14 @@
 
 package {
   name    = "lwip"
-  version = "0.1.1"
+  version = "0.1.2"
+  sysl    = "0.6.0"
 }
 
 // On a board there is no C library, so lwIP's C is compiled against cstd's headers and links cstd's
 // definitions; on the host the dependency is dropped and the real libc answers.
 dependencies {
-  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.4", if = "!libc" }
+  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.7", if = "!libc" }
 }
 
 // **lwIP's tree is upstream's 2.2.1 `src/`, byte for byte.** Everything this package decides about it

@@ -3,6 +3,7 @@ module sh.sysl.lwip
 
 import sh.sysl.lwip.c
 import sysl.text.str_view
+import sysl.raw.ptr_cast
 
 // lwIP, the TCP/IP stack most microcontroller networking runs on, driven with no operating system
 // under it: one thread calls in, lwIP calls back.

@@ -3,6 +3,7 @@ module sh.sysl.lwip
 
 import sh.sysl.lwip.c
 import sysl.slices.as_ptr
+import sysl.raw.ptr_cast
 
 // A device that sends and receives Ethernet frames: an Ethernet MAC, or a Wi-Fi chip in station mode
 // (which hands its host Ethernet frames too, the Pico 2 W's CYW43439 among them).

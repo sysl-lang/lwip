@@ -1,7 +1,7 @@
 module sh.sysl.lwip
 @tests
 
-// cstd as lwIP's C library on a board. `package.hocon` takes cstd with `if = "!libc"`, so for a
+// cstd as lwIP's C library on a board. `sysl.hocon` takes cstd with `if = "!libc"`, so for a
 // bare-metal target lwIP's 32 C files compile against cstd's headers and the archive carries cstd's
 // definitions of the libc functions they call; on the host the dependency is dropped and the real
 // libc answers. `examples/board.sysl` is the project built, since an archive of the whole stack is
