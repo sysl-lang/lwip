@@ -287,8 +287,8 @@ echo_request(id: u16, seq: u16, payload: []const u8) -> Buf[u8]
     m.extend([8u8, 0, 0, 0, u8(id >> 8), u8(id & 0xff), u8(seq >> 8), u8(seq & 0xff)][..])
     m.extend(payload)
     val sum = internet_checksum(m.view())
-    m.view()[2] = u8(sum >> 8)
-    m.view()[3] = u8(sum & 0xff)
+    m.view_mut()[2] = u8(sum >> 8)
+    m.view_mut()[3] =u8(sum & 0xff)
     m
 
 internet_checksum(data: []const u8) -> u16
