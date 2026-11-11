@@ -19,7 +19,7 @@ Pico 2 W's CYW43439 hands its host Ethernet frames, and its SDK networks through
 
 ```hocon
 dependencies {
-  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.1" }
+  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.3" }
 }
 ```
 
@@ -137,7 +137,7 @@ binding's C and every size the binding measures:
 
 ```hocon
 dependencies {
-  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.1", c_include = ["config"] }
+  lwip { git = "github.com/sysl-lang/lwip", version = "0.1.3", c_include = ["config"] }
 }
 ```
 
